@@ -78,6 +78,13 @@ class FakeJournalReader implements JournalReader {
     next.resolve(page);
   }
 
+  /** Rejects the OLDEST not-yet-resolved `readHistory()` call — the reject counterpart to `resolveNext()`, for exercising join.ts's error/reconnect paths (Fix 3/4 coverage). */
+  rejectNext(err: unknown): void {
+    const next = this.pending.shift();
+    if (!next) throw new Error("FakeJournalReader.rejectNext: no pending readHistory() call to reject");
+    next.reject(err);
+  }
+
   get pendingCount(): number {
     return this.pending.length;
   }
@@ -89,6 +96,9 @@ class FakeLiveConnection {
   private ended = false;
   private failure: unknown;
   private hasFailure = false;
+
+  /** Number of times this connection's async iterator's `.return()` was called — lets a test confirm join.ts's cleanup (`liveIterator.return?.()` in its `finally` block) actually ran, e.g. before reconnecting. */
+  returnCalls = 0;
 
   /** Injects one frame. If the connection is currently being awaited on (a `next()` call is pending), it's delivered immediately; otherwise it's buffered until read. */
   push(frame: SseFrame): void {
@@ -124,6 +134,12 @@ class FakeLiveConnection {
           return this.hasFailure ? Promise.reject(this.failure) : Promise.resolve({ value: undefined, done: true });
         }
         return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
+      },
+      return: (): Promise<IteratorResult<SseFrame, undefined>> => {
+        this.returnCalls++;
+        this.ended = true;
+        for (const w of this.waiters.splice(0)) w.resolve({ value: undefined, done: true });
+        return Promise.resolve({ value: undefined, done: true });
       },
     };
   }
@@ -448,6 +464,139 @@ describe("joinSessionView: reconnect mid-stream", () => {
 
     const all = [...cycle1, ...cycle2];
     expect(all.map(seqOf)).toEqual([0, 1, 2, 3, 4, 5, 6]); // no gap, no duplicate across the reconnect boundary
+
+    await gen.return();
+  });
+});
+
+// --- 7. Error paths: readHistory() rejecting, and the live connection failing ---
+//
+// Fix 3/4 coverage: these two failure sources (readHistory() rejecting
+// mid-catch-up; the live connection's async iterator throwing) were always
+// correctly PROPAGATED by join.ts (verified by the reviewer), but had no
+// test exercising them, and — until Fix 4 — `autoReconnect: true` didn't
+// actually cover either of them (only a CLEAN live-stream end triggered a
+// reconnect; an error always propagated regardless of `autoReconnect`).
+// Each failure source gets one test proving the `autoReconnect: false`
+// propagation-plus-cleanup behavior, and one proving the NEW
+// `autoReconnect: true` reconnect-instead-of-propagate behavior.
+
+describe("joinSessionView: readHistory() rejecting", () => {
+  it("propagates the rejection to the caller and cleans up the live connection, when autoReconnect is false", async () => {
+    const journal = new FakeJournalReader();
+    const liveSource = new FakeLiveSource();
+    const gen = joinSessionView(journal, "sid-err-1", liveSource.open); // autoReconnect defaults false
+
+    const firstNext = gen.next();
+    expect(journal.calls).toHaveLength(1);
+    const conn = liveSource.connections[0]!;
+
+    const boom = new Error("journal read failed");
+    journal.rejectNext(boom);
+
+    await expect(firstNext).rejects.toBe(boom);
+    // Cleanup happened as part of the generator unwinding through its
+    // `finally` block (no hang: the rejection above already proves that) —
+    // the live connection's iterator `.return()` was invoked.
+    expect(conn.returnCalls).toBeGreaterThan(0);
+  });
+
+  it("triggers a reconnect attempt instead of propagating, when autoReconnect is true", async () => {
+    const journal = new FakeJournalReader();
+    const liveSource = new FakeLiveSource();
+    const gen = joinSessionView(journal, "sid-err-2", liveSource.open, { autoReconnect: true, reconnectDelayMs: 0 });
+
+    const firstNext = gen.next();
+    expect(liveSource.connections).toHaveLength(1);
+    expect(journal.calls).toHaveLength(1);
+    const conn1 = liveSource.connections[0]!;
+
+    const boom = new Error("transient failure");
+    journal.rejectNext(boom);
+
+    // firstNext must NOT reject: the error is swallowed internally and the
+    // join reconnects instead, so this promise stays pending until the
+    // reconnected cycle actually yields something. Give the reconnect
+    // loop's microtasks a chance to run before asserting on it.
+    for (let i = 0; i < 10 && liveSource.connections.length < 2; i++) await Promise.resolve();
+    expect(liveSource.connections).toHaveLength(2); // a fresh connection was opened
+    expect(conn1.returnCalls).toBeGreaterThan(0); // the old one was cleaned up first
+    expect(journal.calls).toHaveLength(2); // a fresh readHistory() call was issued
+    expect(journal.calls[1]).toMatchObject({ fromJournalSeq: 0 }); // nothing was durably applied yet, so it resumes from 0
+
+    // Resolve the fresh cold read so the generator can make progress and
+    // firstNext finally settles — proving it never rejected.
+    journal.resolveNext({ events: [mkStatusEvent(0)], next_journal_seq: 1, done: true });
+    const first = await firstNext;
+    if (first.done) throw new Error("unreachable");
+    expect(first.value.ok).toBe(true);
+    expect(seqOf(first.value)).toBe(0);
+    expect(first.value.input.segment).toBe("history");
+
+    await gen.return();
+  });
+});
+
+describe("joinSessionView: the live connection failing", () => {
+  it("propagates the rejection to the caller and cleans up, when autoReconnect is false", async () => {
+    const journal = new FakeJournalReader();
+    const liveSource = new FakeLiveSource();
+    const gen = joinSessionView(journal, "sid-err-3", liveSource.open); // autoReconnect defaults false
+
+    const firstNext = gen.next();
+    const conn = liveSource.connections[0]!;
+    journal.resolveNext({ events: [mkStatusEvent(0)], next_journal_seq: 1, done: true });
+
+    const first = await firstNext; // history seq 0 delivered fine
+    if (first.done) throw new Error("unreachable");
+
+    // Resume the generator past the yield so it reaches step 4's
+    // `await queue.next()` (cold catch-up is already done: the single page
+    // reported `done: true`), THEN fail the connection.
+    const secondNext = gen.next();
+    await Promise.resolve();
+    const boom = new Error("connection reset");
+    conn.fail(boom);
+
+    await expect(secondNext).rejects.toBe(boom);
+    expect(conn.returnCalls).toBeGreaterThan(0);
+  });
+
+  it("triggers a reconnect attempt instead of propagating, when autoReconnect is true", async () => {
+    const journal = new FakeJournalReader();
+    const liveSource = new FakeLiveSource();
+    const gen = joinSessionView(journal, "sid-err-4", liveSource.open, { autoReconnect: true, reconnectDelayMs: 0 });
+
+    const firstNext = gen.next();
+    const conn1 = liveSource.connections[0]!;
+    journal.resolveNext({ events: [mkStatusEvent(0)], next_journal_seq: 1, done: true });
+
+    const first = await firstNext;
+    if (first.done) throw new Error("unreachable");
+
+    const secondNext = gen.next();
+    await Promise.resolve();
+    const boom = new Error("connection reset");
+    conn1.fail(boom);
+
+    // secondNext must NOT reject: the failure triggers a reconnect instead.
+    for (let i = 0; i < 10 && liveSource.connections.length < 2; i++) await Promise.resolve();
+    expect(liveSource.connections).toHaveLength(2);
+    expect(conn1.returnCalls).toBeGreaterThan(0);
+    // The reconnect's cold catch-up resumes from the highest journal_seq
+    // already applied (1), not from 0 again — the exact-once property holds
+    // across an error-triggered reconnect exactly as it does for a clean one.
+    expect(journal.calls[journal.calls.length - 1]).toMatchObject({ fromJournalSeq: 1 });
+
+    const conn2 = liveSource.connections[1]!;
+    conn2.push(mkEnduringFrame(1));
+    journal.resolveNext({ events: [], next_journal_seq: 1, done: true });
+
+    const second = await secondNext;
+    if (second.done) throw new Error("unreachable");
+    expect(second.value.ok).toBe(true);
+    expect(seqOf(second.value)).toBe(1);
+    expect(second.value.input.segment).toBe("live");
 
     await gen.return();
   });
