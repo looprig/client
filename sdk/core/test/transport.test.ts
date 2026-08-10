@@ -17,6 +17,8 @@ import {
   IdempotencyConflictError,
   InternalServerError,
   InvalidBodyError,
+  LooprigError,
+  MalformedResponseError,
   NetworkError,
   RequestAbortedError,
   SessionNotFoundError,
@@ -161,6 +163,28 @@ describe("BFFTransport error envelope mapping (real HTTP round trip)", () => {
       });
     });
   }
+});
+
+describe("BFFTransport malformed error envelope handling", () => {
+  it("falls back to MalformedResponseError (not ContractValidationError, not a LooprigError subclass) when a non-2xx body is valid JSON but doesn't match the error_response schema", async () => {
+    const { baseUrl, server } = await startServer((_req, res) => {
+      // Well-formed JSON, but not the BFF's {error:{code,message,retryable}}
+      // envelope — e.g. an infrastructure proxy/load balancer's own error
+      // shape for a 502, rather than the BFF itself ever handling the request.
+      sendJSON(res, 502, { message: "Bad Gateway" });
+    });
+    activeServer = server;
+
+    const transport = new BFFTransport({ baseUrl });
+
+    const rejection = transport.listSessions();
+    await expect(rejection).rejects.toBeInstanceOf(MalformedResponseError);
+    await expect(rejection).rejects.not.toBeInstanceOf(ContractValidationError);
+    await expect(rejection).rejects.not.toBeInstanceOf(LooprigError);
+    await rejection.catch((err: MalformedResponseError) => {
+      expect(err.status).toBe(502);
+    });
+  });
 });
 
 describe("BFFTransport abort handling", () => {

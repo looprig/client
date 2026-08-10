@@ -25,7 +25,7 @@ import {
   NetworkError,
   RequestAbortedError,
 } from "./errors.js";
-import type { EventJournalPage, SessionList, SessionStatus } from "./types.js";
+import type { ErrorResponse, EventJournalPage, SessionList, SessionStatus } from "./types.js";
 import { validateErrorResponse, validateEventJournalPage, validateSessionList, validateSessionStatus } from "./validate.js";
 
 /** Common options every transport method accepts. */
@@ -165,7 +165,21 @@ export class BFFTransport implements LooprigTransport {
     }
 
     if (!response.ok) {
-      const errorBody = validateErrorResponse(body);
+      let errorBody: ErrorResponse;
+      try {
+        errorBody = validateErrorResponse(body);
+      } catch (cause) {
+        // The response was valid JSON but didn't conform to the BFF's
+        // error_response envelope — e.g. an infrastructure proxy/load
+        // balancer returning its own `{"message": "Bad Gateway"}` shape for
+        // a 502 instead of the BFF ever handling the request. Degrade the
+        // same way a fully non-JSON body already does (MalformedResponseError),
+        // rather than letting ContractValidationError — an implementation
+        // detail of validate.ts, not part of this module's documented
+        // exception surface — leak to callers. The original validation
+        // failure is preserved as `cause` for debugging.
+        throw new MalformedResponseError(path, response.status, { cause });
+      }
       throw errorFromResponse(response.status, errorBody);
     }
 
