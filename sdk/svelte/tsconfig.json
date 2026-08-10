@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    // "DOM" supplies AbortSignal (re-exported through @looprig/client's
+    // RequestOptions) — the same lib addition sdk/core's tsconfig makes, for
+    // the same reason: this is a TypeScript-bundled lib, not a new
+    // dependency. "svelte" pulls in svelte's ambient global declarations for
+    // $state/$derived/$effect (node_modules/svelte/types/index.d.ts) — those
+    // runes are plain ambient globals (`declare function $state<T>(...)`),
+    // not new TS syntax, so no custom transform is needed for tsc to
+    // TYPE-CHECK them. Actually compiling rune syntax into reactive runtime
+    // code is a separate concern, done by the Svelte compiler
+    // (vite-plugin-svelte) wherever this source is bundled — see the note
+    // atop src/session.svelte.ts.
+    "lib": ["ES2022", "DOM"],
+    "types": ["svelte"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "include": ["src"]
+}

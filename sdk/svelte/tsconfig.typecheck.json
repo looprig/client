@@ -1,0 +1,14 @@
+{
+  // Same rationale as sdk/core's tsconfig.typecheck.json: a separate,
+  // wider-scoped config (rootDir ".", test/ included, noEmit) so `npm run
+  // typecheck` checks test/ too without breaking the build script's
+  // rootDir-"src" emit (`tsc -p tsconfig.json` would fail TS6059 the moment
+  // test/ enters its include).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "types": ["svelte", "node"]
+  },
+  "include": ["src", "test"]
+}

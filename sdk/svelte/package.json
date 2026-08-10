@@ -1,27 +1,23 @@
 {
-  "name": "@looprig/client",
+  "name": "@looprig/svelte",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    }
-  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.typecheck.json"
   },
+  "peerDependencies": {
+    "svelte": "^5.0.0"
+  },
   "dependencies": {
-    "ajv": "^8.20.0",
-    "json-schema-to-ts": "^3.1.1"
+    "@looprig/client": "0.0.0"
   },
   "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@types/node": "^22.0.0",
+    "svelte": "^5.56.1",
     "typescript": "^6.0.0",
     "vitest": "^4.1.10"
   }
