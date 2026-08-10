@@ -88,3 +88,28 @@ func NewMux(read ReadSource, guard *HostOriginGuard, csrf *CSRFGuard, hostConfig
 func (m *BFFMux) RegisterControlRoute(pattern string, handler http.Handler) {
 	m.mux.Handle(pattern, m.csrf.Wrap(handler))
 }
+
+// RegisterEventsRoute adds a read-shaped route (opening a live SSE stream, e.g.
+// via NewSSEProxy — see events.go) directly to the mux, WITHOUT wrapping it in the
+// CSRF guard. This is deliberate, not an oversight: CSRFGuard.Wrap only ever
+// demands a token for POST/PUT/PATCH/DELETE (see csrf.go's doc) and passes every
+// other method — including the GET an EventSource issues to open a stream —
+// through untouched regardless of which wrapper it goes through. Opening an SSE
+// stream is a read (no state changes on the server), the same category as the
+// read-plane routes NewMux registers directly on mux with no CSRF wrapping at
+// all; routing it through RegisterControlRoute instead would be misleading (it
+// would silently no-op the CSRF check on a route that was never state-changing)
+// and would misclassify it in RegisterControlRoute's "state-changing route" doc
+// contract. HostOriginGuard (guard.Wrap, wrapping the whole *BFFMux) still
+// protects this route exactly as it protects every other one.
+//
+// pattern follows the same net/http.ServeMux Go 1.22+ syntax as
+// RegisterControlRoute and NewMux's own routes (e.g.
+// "GET /api/v1/sessions/{sid}/events"). No composition root wires a route through
+// this method yet — the control/session host that would supply NewSSEProxy's
+// upstream URL doesn't exist as a construction-time parameter of NewMux — so this
+// is the sanctioned seam a later task uses, not something exercised by NewMux
+// itself today.
+func (m *BFFMux) RegisterEventsRoute(pattern string, handler http.Handler) {
+	m.mux.Handle(pattern, handler)
+}

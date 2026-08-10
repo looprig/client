@@ -236,3 +236,51 @@ func TestNewMuxRegisterControlRouteAppliesCSRF(t *testing.T) {
 		})
 	}
 }
+
+// TestNewMuxRegisterEventsRouteIsReachableWithNoCSRFToken proves
+// RegisterEventsRoute (mux.go) wires a handler directly onto the mux — reachable
+// through HostOriginGuard exactly like every other route, but with NO CSRF token
+// required at all, even though no token was minted or presented. This is the
+// intended difference from RegisterControlRoute: an SSE proxy route is a GET
+// (read), never state-changing, so it must never depend on the SPA having
+// already obtained a CSRF token (a chicken-and-egg problem for the very first
+// request opening a live stream).
+func TestNewMuxRegisterEventsRouteIsReachableWithNoCSRFToken(t *testing.T) {
+	t.Parallel()
+
+	read, _ := newMountedSource(t)
+	mux := bff.NewMux(read, bff.NewHostOriginGuard(), bff.NewCSRFGuard(time.Hour), true)
+
+	called := false
+	eventsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.RegisterEventsRoute("GET /api/v1/sessions/{sid}/events", eventsHandler)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/abc/events", nil)
+	req.Host = loopbackHost
+	// Deliberately no X-CSRF-Token header.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET events route status = %d, want %d (no CSRF token should ever be required for a GET)", rec.Code, http.StatusOK)
+	}
+	if !called {
+		t.Error("events handler was never called")
+	}
+
+	// HostOriginGuard still applies: a rebound Host must still be rejected.
+	badHostReq := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/abc/events", nil)
+	badHostReq.Host = "evil.example:7777"
+	badHostRec := httptest.NewRecorder()
+	called = false
+	mux.ServeHTTP(badHostRec, badHostReq)
+	if badHostRec.Code != http.StatusForbidden {
+		t.Errorf("GET events route with rebound host status = %d, want %d", badHostRec.Code, http.StatusForbidden)
+	}
+	if called {
+		t.Error("events handler was reached despite a rebound Host header; HostOriginGuard must reject first")
+	}
+}
