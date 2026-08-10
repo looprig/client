@@ -1,0 +1,6 @@
+node_modules/
+pkg/webui/dist/*
+!pkg/webui/dist/index.html
+app/.svelte-kit/
+app/build/
+*.test
