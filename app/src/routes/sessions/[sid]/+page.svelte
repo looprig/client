@@ -20,10 +20,16 @@
 	// their own history join). So this route renders each journal entry
 	// honestly: its known envelope fields as structured data, plus whatever
 	// additional (untyped, per the open payload) fields the entry happens to
-	// carry, rendered generically as key/value pairs — never as markdown or
-	// code, since nothing in this shape is long-form text or source code
-	// today. shiki/svelte-exmarkdown are therefore deliberately NOT wired
-	// into this route; see the task report for the full reasoning.
+	// carry, rendered generically as key/value pairs via JSON.stringify.
+	//
+	// StatusEvent payloads DO carry real message content on the wire (AI/user
+	// text via TurnDone.Message etc.) — this route intentionally renders it
+	// as raw JSON rather than a rich transcript, since folding that content
+	// into readable messages is Task 23's job (sdk/core/src/fold.ts), not
+	// this route's. A future task should wire the fold output in here
+	// instead of this raw dump. shiki/svelte-exmarkdown are therefore
+	// deliberately NOT wired into this route; see the task report for the
+	// full reasoning.
 	import { untrack } from "svelte";
 	import { page } from "$app/state";
 	import {
