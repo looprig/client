@@ -47,7 +47,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { SseFrameError, SseFrameParser, type SseFrame } from "../src/sse.js";
+import { MAX_BUFFERED_LINE_BYTES, SseFrameError, SseFrameParser, type SseFrame } from "../src/sse.js";
 
 const fixtureDir = fileURLToPath(new URL("../../../contract/fixtures/", import.meta.url));
 
@@ -367,6 +367,107 @@ describe("malformed frames", () => {
 });
 
 // --- 5. finish() / stream-end semantics --------------------------------------
+
+// --- 6. Bounded buffer growth / bounded scan cost ----------------------------
+//
+// Regression coverage for the reviewer-reproduced bug: a line that never
+// terminates must (a) never grow the buffer without bound, and (b) never
+// make feed() cost grow quadratically in the number of chunks delivered
+// before the cap is hit. See sse.ts's module comment ("Bounded buffering,
+// and an O(n) (not O(n²)) scan for an unterminated line") for the fix this
+// exercises.
+
+describe("bounded buffer growth: an unterminated line exceeding MAX_BUFFERED_LINE_BYTES", () => {
+  it("yields a typed ErrorSseFrame instead of growing the buffer without bound, and the parser recovers afterward", () => {
+    const parser = new SseFrameParser();
+    // No "\n"/"\r" anywhere in this chunk at all — feed()ing it repeatedly
+    // simulates a single data: line arriving across many small reads with no
+    // terminator ever showing up, exactly the scenario the reviewer measured
+    // >13.8s / ~472MB heap growth for.
+    const chunk = new TextEncoder().encode("x".repeat(64 * 1024)); // 64 KiB, no line terminator
+    let sawOversizedError = false;
+    let totalFed = 0;
+    // Hard iteration ceiling so a regression hangs this test's assertion
+    // (fails fast) instead of actually spinning forever / OOMing the runner.
+    for (let i = 0; i < 64 && !sawOversizedError; i++) {
+      const frames = parser.feed(chunk);
+      totalFed += chunk.length;
+      if (frames.some((f) => f.type === "error" && /buffered-line limit/.test(f.error.message))) {
+        sawOversizedError = true;
+      }
+    }
+
+    expect(sawOversizedError).toBe(true);
+    // Sanity: the cap really was exceeded (not something trivially small) —
+    // proves the assertion above is exercising the real limit, not a fluke.
+    expect(totalFed).toBeGreaterThan(MAX_BUFFERED_LINE_BYTES);
+
+    // The parser is not permanently wedged: a well-formed frame fed right
+    // after the oversized one still parses correctly.
+    const recovered = [...parser.feed(validEphemeralBytes), ...parser.finish()];
+    expect(recovered).toEqual([{ type: "ephemeral", data: validEphemeralExpectedData }]);
+  });
+
+  it("a line comfortably UNDER the cap, split across many small chunks, is parsed correctly and is not affected by the cap", () => {
+    // Guards against an off-by-one / overly aggressive cap: a large-but-legal
+    // line must still complete normally rather than tripping the limiter.
+    const bigValue = "y".repeat(MAX_BUFFERED_LINE_BYTES - 4096);
+    const bytes = new TextEncoder().encode(`event: bogus\ndata: ${bigValue}\n\n`);
+    const parser = new SseFrameParser();
+    const frames: SseFrame[] = [];
+    for (let i = 0; i < bytes.length; i += 997) {
+      // odd, non-power-of-two chunk size on purpose
+      frames.push(...parser.feed(bytes.slice(i, i + 997)));
+    }
+    frames.push(...parser.finish());
+    expect(frames).toHaveLength(1);
+    // "bogus" isn't a recognized event: value, so this is an error frame —
+    // but critically NOT the "buffered-line limit" error: the line completed
+    // (found its terminator) well before the cap would ever fire.
+    expect(frames[0]!.type).toBe("error");
+    expect((frames[0] as Extract<SseFrame, { type: "error" }>).error.message).toMatch(/unrecognized "event:" value/);
+  });
+});
+
+describe("bounded scan cost: many small chunks of one large-but-under-the-cap line parse in bounded time", () => {
+  it("regression guard for the O(n^2) rescan-from-zero bug: total feed() time stays well under a generous bound", () => {
+    // Shape mirrors the reviewer's repro (many small chunks completing one
+    // large logical line) but sized to comfortably clear the buffered-line
+    // cap's own sanity margin while staying fast to run in CI. Under the
+    // pre-fix "rescan the whole buffer from index 0 on every feed()"
+    // behavior, a few hundred small chunks against a buffer this size is
+    // already enough to be clearly, non-flakily slow; a correct incremental
+    // scan (SseFrameParser.scanFrom) finishes near-instantly regardless of
+    // chunk count.
+    const bigValue = "z".repeat(900_000); // under MAX_BUFFERED_LINE_BYTES (1 MiB)
+    const dataText = JSON.stringify({ padding: bigValue });
+    // "event: bogus" short-circuits straight to an error frame with no
+    // JSON.parse/ajv work at all (see sse.ts's dispatch()), isolating this
+    // measurement to line-scanning cost specifically, not JSON/validation cost.
+    const bytes = new TextEncoder().encode(`event: bogus\ndata: ${dataText}\n\n`);
+
+    const parser = new SseFrameParser();
+    const chunkSize = 200; // ~4500 feed() calls for this payload
+    const frames: SseFrame[] = [];
+    const start = performance.now();
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      frames.push(...parser.feed(bytes.slice(i, i + chunkSize)));
+    }
+    frames.push(...parser.finish());
+    const elapsedMs = performance.now() - start;
+
+    expect(frames).toHaveLength(1);
+    expect(frames[0]!.type).toBe("error"); // unrecognized event: value, not the size cap
+    // Empirically calibrated bound: the pre-fix O(n^2) rescan-from-zero
+    // behavior measured ~2.2s for this exact shape at chunkSize=500 (and the
+    // reviewer measured >13.8s for a larger, comparable-shape repro); this
+    // fixed parser measured ~0.08s for the same input. 1000ms leaves ample
+    // headroom above the fixed behavior while sitting well below what the
+    // O(n^2) behavior actually costs, so this would fail if that rescan
+    // regressed rather than passing coincidentally on a fast machine.
+    expect(elapsedMs).toBeLessThan(1000);
+  });
+});
 
 describe("finish()", () => {
   it("an unterminated trailing partial line (stream closed mid-line) is discarded, not force-processed", () => {

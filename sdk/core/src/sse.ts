@@ -79,6 +79,22 @@
  *    than expected arrived" means "nothing happened" or "something was
  *    silently thrown away."
  *
+ * ## Bounded buffering, and an O(n) (not O(n²)) scan for an unterminated line
+ *
+ * `feed()` appends every chunk to an internal buffer and looks for the next
+ * line terminator; a line that never terminates (a very large single
+ * `data:` line delivered across many small reads — realistic given a
+ * reverse-proxy's own read-and-flush-immediately behavior, not just
+ * adversarial input) would otherwise make that buffer grow without bound
+ * AND make every `feed()` call rescan the whole thing from byte 0 looking
+ * for a terminator that isn't there — O(n²) total work for one huge line.
+ * `MAX_BUFFERED_LINE_BYTES` bounds the growth (an oversized line becomes a
+ * typed `ErrorSseFrame`, same as any other malformed frame, rather than an
+ * unbounded allocation); `SseFrameParser.scanFrom` fixes the rescan (each
+ * `drain()` call only scans the newly appended suffix, not bytes a prior
+ * call already confirmed contain no terminator) — see both symbols' own doc
+ * comments for the detail.
+ *
  * ## Chunk-boundary / UTF-8 safety
  *
  * Bytes are decoded incrementally with `TextDecoder`'s `{ stream: true }`
@@ -145,6 +161,31 @@ export class SseFrameError extends Error {
 const JOURNAL_SEQ_PATTERN = /^\d+$/;
 
 /**
+ * Maximum number of decoded `string` characters (effectively bytes, since
+ * this wire format's field lines and JSON payloads are ASCII/UTF-8
+ * single-code-unit content — see the module comment's "chunk-boundary /
+ * UTF-8 safety" section) `feed()`/`finish()` will buffer for a single
+ * not-yet-terminated line before giving up on it and reporting an
+ * `ErrorSseFrame` instead of continuing to grow the buffer without bound.
+ *
+ * Without this cap, a very large single `data:` line delivered across many
+ * small network reads (realistic — see the module comment's "unbounded
+ * buffer growth" discussion; this doesn't require adversarial input, just
+ * the BFF proxy's own read-and-flush-immediately behavior on a large
+ * payload with no terminator arriving for a while) would make `buffer` grow
+ * without limit, eventually exhausting memory.
+ *
+ * 1 MiB is chosen as comfortably larger than any real frame this server is
+ * expected to emit today — the largest golden fixture in
+ * `contract/fixtures/` (`enduring_frame.sse`) is a few hundred bytes total —
+ * while still being far short of "unbounded". A real oversized/malformed
+ * line hitting this cap is treated exactly like any other malformed frame
+ * (see the module comment on `ErrorSseFrame`): reported in-band, buffering
+ * state reset, parsing resumes on the next frame.
+ */
+export const MAX_BUFFERED_LINE_BYTES = 1024 * 1024; // 1 MiB
+
+/**
  * Result of locating the next line terminator in a string starting at
  * `from`. `length` is 1 for a bare `\n` or `\r`, 2 for `\r\n`.
  *
@@ -153,6 +194,12 @@ const JOURNAL_SEQ_PATTERN = /^\d+$/;
  * pair whose `\n` hasn't arrived in a chunk yet) and is NOT reported as a
  * terminator unless `atEnd` is set (end of stream reached, no more bytes
  * are coming, so it must be a bare CR terminator).
+ *
+ * Callers drive incremental scanning by passing `from` as the offset up to
+ * which a PRIOR call already established "no terminator exists in
+ * [0, from)" for the CURRENT buffer (see `SseFrameParser.scanFrom`) — this
+ * function itself is stateless and just scans `[from, s.length)`, same as
+ * always; the incrementality is entirely the caller's bookkeeping.
  */
 function nextLineBreak(s: string, from: number, atEnd: boolean): { index: number; length: number } | null {
   for (let i = from; i < s.length; i++) {
@@ -184,6 +231,22 @@ function nextLineBreak(s: string, from: number, atEnd: boolean): { index: number
 export class SseFrameParser {
   private readonly decoder = new TextDecoder("utf-8");
   private buffer = "";
+
+  /**
+   * Offset into `buffer` up to which a prior `drain()` call already
+   * confirmed "no line terminator exists in `buffer[0, scanFrom)`". Reset to
+   * `0` whenever `buffer` is sliced (the remaining suffix hasn't been
+   * scanned yet); otherwise carried forward across `feed()` calls so a
+   * `nextLineBreak` scan only ever examines the NEWLY appended portion of an
+   * unterminated line, not the whole thing from scratch every time. This is
+   * what turns "N chunks appended to one giant unterminated line" from
+   * O(total bytes²) (rescanning everything already confirmed
+   * terminator-free, on every single chunk) into O(total bytes) (each byte
+   * scanned once, the first time it's appended) — see the module comment's
+   * "unbounded buffer growth" discussion for the concrete measurement this
+   * fixes.
+   */
+  private scanFrom = 0;
 
   // Accumulated state for the block currently being read (reset on every dispatch).
   private currentEvent: string | undefined;
@@ -217,14 +280,53 @@ export class SseFrameParser {
   private drain(atEnd: boolean): SseFrame[] {
     const frames: SseFrame[] = [];
     for (;;) {
-      const found = nextLineBreak(this.buffer, 0, atEnd);
-      if (found === null) break;
+      const found = nextLineBreak(this.buffer, this.scanFrom, atEnd);
+      if (found === null) {
+        if (this.buffer.length > MAX_BUFFERED_LINE_BYTES) {
+          frames.push(this.failOversizedLine());
+          break; // buffer/block state were just reset; nothing left to scan until the next feed()
+        }
+        // Remember how far this scan confirmed there's no terminator, so the
+        // NEXT feed() call's drain() only rescans the newly appended suffix.
+        // A lone trailing `\r` is the one byte that's still ambiguous (it
+        // might turn into a `\r\n` pair once more bytes arrive — see
+        // nextLineBreak's doc comment) so it must be re-examined next time,
+        // not skipped.
+        this.scanFrom = this.buffer.endsWith("\r") ? this.buffer.length - 1 : this.buffer.length;
+        break;
+      }
       const line = this.buffer.slice(0, found.index);
       this.buffer = this.buffer.slice(found.index + found.length);
+      this.scanFrom = 0; // fresh remainder buffer: nothing in it has been scanned yet
       const frame = this.processLine(line);
       if (frame !== null) frames.push(frame);
     }
     return frames;
+  }
+
+  /**
+   * Called when `buffer` has grown past `MAX_BUFFERED_LINE_BYTES` with no
+   * line terminator ever found — see that constant's doc comment. Reports
+   * the oversized line as a typed `ErrorSseFrame` (same in-band, non-throwing
+   * discipline as every other malformed-frame path in this file) and resets
+   * ALL per-block state (not just `buffer`), discarding whatever partial
+   * block (any already-parsed `event:`/`id:` lines plus the oversized
+   * partial line) was in progress — a half-consumed block can't be
+   * meaningfully resumed once its most recent line has been thrown away, so
+   * parsing resumes cleanly on the NEXT blank-line-delimited block instead.
+   */
+  private failOversizedLine(): ErrorSseFrame {
+    const preview =
+      this.buffer.length > 256 ? `${this.buffer.slice(0, 256)}… [${this.buffer.length} chars total, truncated]` : this.buffer;
+    const raw = [...this.rawLines, preview].join("\n");
+    const frame = errorFrame(
+      `SSE line exceeded the ${MAX_BUFFERED_LINE_BYTES}-byte buffered-line limit with no line terminator found`,
+      raw,
+    );
+    this.resetBlock();
+    this.buffer = "";
+    this.scanFrom = 0;
+    return frame;
   }
 
   private processLine(line: string): SseFrame | null {
