@@ -92,10 +92,20 @@ func (g *HostOriginGuard) hostAllowed(hostHeader string) bool {
 // compared, symmetric with hostAllowed's "any port" treatment of the Host
 // header. An unparseable Origin, or one with no host at all (e.g. the literal
 // string "null" browsers send for some sandboxed/cross-origin contexts), fails
-// secure: false.
+// secure: false. An Origin carrying userinfo (e.g.
+// "http://evil.example@127.0.0.1/") is also rejected: real browsers never
+// construct an Origin header with a userinfo component, so this isn't
+// exploitable under the actual threat model, but url.URL.Hostname() ignores
+// userinfo entirely, so without this check such an Origin would otherwise be
+// compared and accepted on the userinfo's *host* portion alone — a cheap,
+// fail-secure tightening against a spoofed-looking value that has no
+// legitimate reason to appear here.
 func (g *HostOriginGuard) originAllowed(origin string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
+		return false
+	}
+	if u.User != nil {
 		return false
 	}
 	host := u.Hostname()
