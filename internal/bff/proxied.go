@@ -117,18 +117,15 @@ func NewProxiedReadSource(upstreamBaseURL *url.URL, token string, opts ...Proxie
 	}
 
 	target := *upstreamBaseURL
-	authHeader := "Bearer " + token
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(&target)
-			// Server-side token custody: strip whatever Authorization the
-			// inbound request carried (a compromised or confused SPA might
-			// smuggle one) and set exactly the configured server-side
-			// token. Order matters: Del then Set, so no inbound value can
-			// survive alongside or instead of ours.
-			pr.Out.Header.Del("Authorization")
-			pr.Out.Header.Set("Authorization", authHeader)
+			// Server-side token custody: see setOutboundAuthorization
+			// (tokencustody.go) — strips whatever Authorization the inbound
+			// request carried and sets exactly the configured server-side
+			// token.
+			setOutboundAuthorization(pr.Out.Header, token)
 		},
 		Transport: transport,
 	}

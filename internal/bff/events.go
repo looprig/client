@@ -262,12 +262,12 @@ func (p *sseProxy) serveEvents(w http.ResponseWriter, r *http.Request) {
 	if lastEventID := r.Header.Get("Last-Event-ID"); lastEventID != "" {
 		outReq.Header.Set("Last-Event-ID", lastEventID)
 	}
-	// Server-side token custody: strip whatever Authorization the inbound
-	// request carried (Del is redundant given the fresh header map above, but
-	// kept for the same explicit belt-and-suspenders reasoning as proxied.go)
-	// and set exactly the configured server-side token.
-	outReq.Header.Del("Authorization")
-	outReq.Header.Set("Authorization", "Bearer "+p.token)
+	// Server-side token custody: see setOutboundAuthorization
+	// (tokencustody.go) — strips whatever Authorization the inbound request
+	// carried (a no-op here given the fresh header map above, but shared logic
+	// beats re-deriving the same Del-then-Set contract a third time) and sets
+	// exactly the configured server-side token.
+	setOutboundAuthorization(outReq.Header, p.token)
 
 	resp, err := p.client.Do(outReq)
 	if err != nil {
