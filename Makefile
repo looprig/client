@@ -52,3 +52,6 @@ contract:
 	cp $(HARNESS_DIR)/pkg/serve/testdata/schema/*.json contract/schema/
 	cp $(HARNESS_DIR)/pkg/serve/testdata/fixtures/* contract/fixtures/
 	@echo "$(HARNESS_VERSION)" > contract/VERSION
+
+sdk:
+	npm ci && npm run build -w sdk/core && npm run test -w sdk/core

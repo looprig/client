@@ -1,0 +1,5 @@
+{
+  "name": "looprig-client-workspace",
+  "private": true,
+  "workspaces": ["sdk/core", "sdk/svelte", "app"]
+}
