@@ -7,16 +7,17 @@
  * no parsing, validation, or protocol-shape logic of its own (that already
  * happened inside the transport call, via sdk/core's ajv validators).
  *
- * sdk/core currently exposes only cold reads (Phase 1a): a page of session
- * summaries, one session's projected status, and a page of a session's
- * durable event journal. There is no SSE/live subscription and no
- * live-plus-history "join" in sdk/core yet (that lands in later tasks), so
- * there is deliberately no "live session" store here either — building one
- * now would mean inventing a fold/reducer this package has no business
- * owning even once it exists, and no real API to wrap yet regardless. When
- * sdk/core grows live methods, the equivalent reactive wrapper belongs
- * alongside these, following the same shape: call the transport, hold the
- * result in `$state`.
+ * sdk/core's cold reads (Phase 1a): a page of session summaries, one
+ * session's projected status, and a page of a session's durable event
+ * journal. The stores below wrap exactly those three one-shot calls.
+ *
+ * The live/streaming counterpart — driving sdk/core's `joinSessionView`
+ * (join.ts, Phase 1c) and republishing its ongoing `SessionView` updates —
+ * lives alongside these in `live-session.svelte.ts`, as `LiveSessionViewStore`,
+ * not in this file: a live join is an ONGOING SUBSCRIPTION (start/stop
+ * lifecycle), not a single request/response `refresh()` call, so it doesn't
+ * fit this file's shared `RefreshGuard` pattern — see that file's own module
+ * comment for the full reasoning.
  *
  * A note on `npm run build`: `tsc` alone does NOT compile rune syntax —
  * `$state(...)`/`$derived(...)` are Svelte-compiler intrinsics, not real

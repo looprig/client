@@ -1,196 +1,299 @@
 <script lang="ts">
-	// Session detail / "cold transcript" route (Task 20): renders one page of
-	// a session's RAW durable event journal (`StatusEvent[]`, from
-	// `LooprigTransport.readHistory` via `SessionHistoryStore` — see
-	// sdk/svelte/src/session.svelte.ts's module comment).
+	// Session detail route (Task 25): the live-plus-history transcript. This
+	// evolves Task 20's route (which rendered the raw, unfolded journal —
+	// `StatusEvent[]`, before fold.ts/join.ts existed) into the intended end
+	// state: ONE renderer fed by sdk/core's `joinSessionView` (join.ts), which
+	// already stitches cold history and the live SSE tail into a single
+	// ordered `SessionView` stream with no gap and no duplicate at the
+	// boundary (see join.ts's own module comment). There is deliberately no
+	// separate "live-only" view and no toggle between cold/live modes — the
+	// whole point of the join is that a renderer never needs to know which
+	// segment a piece of content came from.
 	//
-	// This is deliberately NOT a folded chat transcript. `StatusEvent` is a
-	// thin wrapper — `{ journal_seq, event? }` (contract/schema/
-	// status_event.schema.json) — where `event` is the durable wire envelope
-	// (contract/schema/event_envelope.schema.json): a `type` discriminator, a
-	// schema version `v`, optional producer IDs (session/loop/turn/step/
-	// event) and `created_at`, plus a per-type payload the envelope schema
-	// deliberately does not constrain further ("Only the envelope-invariant
-	// keys are constrained here; the per-type payload is open."). There is no
-	// message/tool-card/gate-prompt fold anywhere in this codebase yet —
-	// that's Task 23 (event folding, owned by sdk/core) and Task 24
-	// (history-live join), both later. Building that logic here would mean
-	// inventing throwaway fold logic Task 23 would have to replace, which the
-	// design explicitly disallows (sdk/svelte and app must not implement
-	// their own history join). So this route renders each journal entry
-	// honestly: its known envelope fields as structured data, plus whatever
-	// additional (untyped, per the open payload) fields the entry happens to
-	// carry, rendered generically as key/value pairs via JSON.stringify.
+	// `LiveSessionViewStore` (sdk/svelte/src/live-session.svelte.ts) drives
+	// the join and republishes each yielded `SessionView` as `$state`; this
+	// component's job is purely presentational: turn that `SessionView` into
+	// a transcript.
 	//
-	// StatusEvent payloads DO carry real message content on the wire (AI/user
-	// text via TurnDone.Message etc.) — this route intentionally renders it
-	// as raw JSON rather than a rich transcript, since folding that content
-	// into readable messages is Task 23's job (sdk/core/src/fold.ts), not
-	// this route's. A future task should wire the fold output in here
-	// instead of this raw dump. shiki/svelte-exmarkdown are therefore
-	// deliberately NOT wired into this route; see the task report for the
-	// full reasoning.
-	import { untrack } from "svelte";
+	// ## Why three separate sections, not one merged/interleaved timeline
+	//
+	// `SessionView` is intentionally NOT a single ordered feed (see fold.ts's
+	// own module comment): `content`, `toolCalls`, `queuedInputs`, and
+	// `compactions` are separate append-only buckets. Content deltas and
+	// ephemeral tool-call/marker frames carry no journal sequence at all (by
+	// design — see sse.ts: ephemeral frames are unsequenced), and their
+	// `header` (an `EventEnvelope`) has no REQUIRED `created_at` either
+	// (event_envelope.schema.json — `created_at` isn't in `required`), so
+	// there is no reliable key this component could sort all four buckets
+	// into one true chronological order by. Fabricating a merged order from
+	// incomplete information would misrepresent data this route doesn't
+	// actually have, the same reasoning Task 20's raw-dump route documented
+	// for not inventing structure beyond what the wire contract provides.
+	// Instead: the growing message transcript (content — the "streaming
+	// bubbles" and tool-use construction chips) is the primary, virtualized,
+	// autoscrolling list; tool call cards (started -> completed) and
+	// queued-input/compaction markers render as their own compact sections
+	// below it, each faithful to ITS OWN bucket's real append order.
+	import { tick, untrack } from "svelte";
 	import { page } from "$app/state";
 	import {
 		createBFFClient,
-		type EventEnvelope,
+		createFetchLiveFrameSource,
+		type ContentDelta,
+		type LiveFrameSource,
 		type LooprigTransport,
-		type StatusEvent,
 	} from "@looprig/client";
-	import { SessionHistoryStore } from "@looprig/svelte";
-	import { VList } from "virtua/svelte";
+	import { LiveSessionViewStore } from "@looprig/svelte";
+	import { VList, type VListHandle } from "virtua/svelte";
 
-	// `sid` is an optional prop, defaulting to the real route param, for
-	// exactly the same reason `transport` defaults to a real
-	// `createBFFClient()`: it's the seam that lets a component test render
-	// this page with a fixed session id directly, without standing up
-	// SvelteKit's router (`vitest-browser-svelte`'s `render()` mounts this
-	// component in isolation — `$app/state`'s `page.params` has no route
-	// context to populate `sid` from in that environment, since no
-	// navigation ever occurred).
-	let { transport = createBFFClient(), sid }: { transport?: LooprigTransport; sid?: string } =
-		$props();
+	// Same override seams as Task 20's route: `transport`/`sid` let a
+	// component test render this page without a real backend or SvelteKit
+	// router; `liveSource` is the equivalent seam for the live half — a test
+	// supplies a fake `LiveFrameSource` (matching join.test.ts's
+	// `FakeLiveConnection`/`FakeLiveSource` shape) instead of a real
+	// `fetch()`-backed one.
+	let {
+		transport = createBFFClient(),
+		liveSource,
+		sid,
+	}: { transport?: LooprigTransport; liveSource?: LiveFrameSource; sid?: string } = $props();
 
-	// `page.params.sid` per SvelteKit's `$app/state` (2.70.x) — the current
-	// way to read a reactive route param in a Svelte 5 component. This app is
-	// `ssr = false` on an adapter-static SPA fallback (see root +layout.ts
-	// and app/vite.config.ts's adapter comment), so there is no server `load`
-	// function to read the param from instead.
-	//
-	// `Page.params`'s static type is `string | undefined` here (not just
-	// `string`) because `$app/state`'s `page` export is typed generically
-	// over EVERY route's param shape, not narrowed to this one dynamic
-	// segment (that narrowing only happens via a route's generated
-	// `./$types`, which a param read outside a `load` function doesn't get).
-	// SvelteKit guarantees a matched `[sid]` route always populates `sid` at
-	// runtime; the `?? ""` fallback exists only to keep this honest for the
-	// type checker, not because an empty id is expected in real usage.
 	const sessionId = $derived(sid ?? page.params.sid ?? "");
 
-	// Rebuilt whenever `sessionId` changes, so navigating client-side from
-	// one session's URL directly to another's re-fetches rather than showing
-	// stale data. `transport` is still captured once via `untrack` (mirrors
-	// the sessions list route — swapping transports mid-session isn't a real
-	// scenario), but unlike that fixed list route, the session id genuinely
-	// can change under client-side routing.
-	const store = $derived(new SessionHistoryStore(untrack(() => transport), sessionId));
+	// Rebuilt whenever `sessionId` (or a test's fixed `liveSource`) changes —
+	// same "$derived store, $effect drives its lifecycle" split as Task 20's
+	// route, generalized to a start()/stop() subscription instead of a single
+	// refresh(). `transport` is captured once via `untrack` (matches Task
+	// 20's own reasoning: swapping transports mid-session isn't real).
+	// `LooprigTransport` structurally satisfies `JournalReader` (both declare
+	// the identical `readHistory` method) — no adapter needed, exactly as
+	// join.ts's own `JournalReader` doc comment says.
+	const store = $derived(
+		new LiveSessionViewStore(
+			untrack(() => transport),
+			sessionId,
+			liveSource ?? createFetchLiveFrameSource(sessionId),
+		),
+	);
 
-	// Runs on mount, and again whenever `store` becomes a new instance (i.e.
-	// `sessionId` changed) — same "$effect calls refresh()" pattern as the
-	// sessions list route, generalized to react to the store identity rather
-	// than assuming a single store for the component's whole lifetime. Skips
-	// the call entirely for the defensive empty-id case above, rather than
-	// issuing a request that can only 404.
+	// `untrack` around both calls is load-bearing, not stylistic: `start()`'s
+	// own body reads `this.active` (a `$state` field, for its idempotency
+	// guard) before writing it, and `stop()`/the async `pump()` loop write
+	// `active`/`view`/etc. too. Svelte 5 tracks EVERY reactive read that
+	// happens synchronously during an effect's execution, including reads
+	// inside methods it calls — so without `untrack`, this effect would end
+	// up implicitly "subscribed" to `store.active` (and friends) purely as a
+	// side effect of `start()`'s internal guard reading it, and every later
+	// write to that field (from the store's own async pump loop) would
+	// reschedule THIS effect, tearing the store down and starting it again
+	// in a tight loop. Verified empirically for this task: omitting
+	// `untrack` here reproduced Svelte's `effect_update_depth_exceeded`
+	// within the first assertion of every test that pushed any live frame.
 	$effect(() => {
 		if (!sessionId) return;
-		void store.refresh();
+		atBottom = true;
+		untrack(() => store.start());
+		return () => untrack(() => store.stop());
 	});
 
-	/** The envelope-invariant keys constrained by event_envelope.schema.json. Everything else on `event` is that type's open, unconstrained payload. */
-	const KNOWN_ENVELOPE_KEYS = new Set([
-		"type",
-		"v",
-		"session_id",
-		"loop_id",
-		"turn_id",
-		"step_id",
-		"event_id",
-		"created_at",
-	]);
+	// --- Transcript rows: group consecutive same-kind content deltas into growing bubbles ---
+
+	interface TextBubbleRow {
+		kind: "text" | "thinking";
+		text: string;
+	}
+	interface ToolUseChipRow {
+		kind: "tool_use";
+		id: string;
+		name: string;
+	}
+	type TranscriptRow = TextBubbleRow | ToolUseChipRow;
 
 	/**
-	 * Every key of `event` beyond the envelope-invariant ones above is that
-	 * event type's open payload — genuinely untyped from `FromSchema`'s
-	 * perspective (the envelope schema has no `additionalProperties: false`),
-	 * but still real data on the wire (e.g. `TurnDone`'s `turn_index`, per
-	 * contract/fixtures/journal_page.json). Reading it via a narrow cast at
-	 * this rendering boundary is the same "explicit serialization boundary"
-	 * carve-out CLAUDE.md's strict-typing rule allows elsewhere (ajv
-	 * validation, JSON unmarshal) — nothing downstream of this function
-	 * treats the values as anything but a display string.
+	 * Folds `content` (fold.ts's `ContentDelta[]`, one entry per streamed
+	 * chunk) into display rows: consecutive `text`/`thinking` chunks of the
+	 * SAME kind merge into one growing bubble (the actual "streaming bubble"
+	 * UX — a message's text should visibly grow in place as chunks arrive,
+	 * not spawn a new bubble per token); a `tool_use` chunk (the model
+	 * constructing a tool call's arguments — distinct from `ToolCallCard`'s
+	 * execution lifecycle, see fold.ts's own doc comment) becomes a compact
+	 * chip, deduplicated against an immediately-preceding chip for the same
+	 * tool-call id so a long partial-JSON stream doesn't spam duplicate rows.
 	 */
-	function extraFields(event: EventEnvelope | undefined): [string, unknown][] {
-		if (!event) return [];
-		return Object.entries(event as unknown as Record<string, unknown>).filter(
-			([key]) => !KNOWN_ENVELOPE_KEYS.has(key),
-		);
+	function buildTranscriptRows(content: ContentDelta[]): TranscriptRow[] {
+		const rows: TranscriptRow[] = [];
+		for (const delta of content) {
+			const last = rows.at(-1);
+			if (delta.chunkType === "text" || delta.chunkType === "thinking") {
+				if (last?.kind === delta.chunkType) {
+					last.text += delta.chunkType === "text" ? delta.text : delta.thinking;
+				} else {
+					rows.push({ kind: delta.chunkType, text: delta.chunkType === "text" ? delta.text : delta.thinking });
+				}
+			} else {
+				// chunkType === "tool_use"
+				if (last?.kind === "tool_use" && last.id === delta.id) continue;
+				rows.push({ kind: "tool_use", id: delta.id, name: delta.name });
+			}
+		}
+		return rows;
 	}
 
-	function formatTimestamp(createdAt: string | undefined): string {
-		if (!createdAt) return "—";
-		const parsed = new Date(createdAt);
-		return Number.isNaN(parsed.getTime()) ? createdAt : parsed.toLocaleString();
+	const transcriptRows = $derived(buildTranscriptRows(store.view.content));
+
+	// --- Stick-to-bottom autoscroll ---
+	//
+	// New content should auto-scroll into view UNLESS the user has manually
+	// scrolled up to read earlier history — forcing scroll-to-bottom
+	// unconditionally on every update would yank the viewport out from under
+	// someone mid-read, a common and specifically-flagged streaming-chat UX
+	// mistake. `atBottom` tracks whether the viewport is currently (near) the
+	// latest row; only when it's true does a new row pull the view down with
+	// it. A real user scroll (up OR back down again) is what flips this flag
+	// via `handleScroll`, driven by virtua's own `onscroll` callback — not
+	// re-derived from `transcriptRows` itself, so the flag reflects genuine
+	// scroll position, not row count.
+	let vlistHandle: VListHandle | undefined = $state();
+	let atBottom = $state(true);
+	/** Slack (pixels) for "close enough to the bottom to count as stuck," absorbing sub-pixel/rounding drift from virtua's own remeasurement after each scrollToIndex. */
+	const STICK_TO_BOTTOM_SLACK_PX = 48;
+
+	function handleScroll(offset: number): void {
+		if (!vlistHandle) return;
+		const distanceFromBottom = vlistHandle.getScrollSize() - vlistHandle.getViewportSize() - offset;
+		atBottom = distanceFromBottom <= STICK_TO_BOTTOM_SLACK_PX;
 	}
+
+	// This effect's ONLY reactive dependency is `rowCount` — `atBottom` is
+	// read via `untrack` deliberately. Reading it reactively would create a
+	// feedback loop: `scrollToIndex` below triggers a real scroll, which
+	// fires virtua's `onscroll` -> `handleScroll` -> writes `atBottom` ->
+	// (if read reactively) reruns THIS effect again, which can scroll again,
+	// generate another scroll event, etc. — this hit Svelte's
+	// `effect_update_depth_exceeded` guard empirically before this fix.
+	// Depending only on `rowCount` means this effect fires exactly once per
+	// new row (a real content-growth event), and each run makes its own
+	// fresh, one-time read of whatever `atBottom` happens to be at that
+	// instant — genuine user-driven scroll changes still take effect on the
+	// NEXT row, they just don't retrigger this effect on their own.
+	$effect(() => {
+		const rowCount = transcriptRows.length;
+		if (rowCount === 0 || !untrack(() => atBottom)) return;
+		// Wait for virtua to have re-rendered/remeasured the new row before
+		// asking it to scroll to it — scrollToIndex against a not-yet-mounted
+		// index would be a no-op.
+		void tick().then(() => {
+			if (!untrack(() => atBottom)) return; // the user may have scrolled up while this tick was pending
+			vlistHandle?.scrollToIndex(rowCount - 1, { align: "end" });
+		});
+	});
 </script>
 
-<main class="mx-auto max-w-4xl p-6">
-	<h1 class="mb-1 text-2xl font-semibold tracking-tight">Session journal</h1>
-	<p class="mb-4 font-mono text-xs text-muted-foreground" data-testid="journal-session-id">{sessionId}</p>
-
-	{#if store.loading}
-		<!-- Loading state: matches the sessions list route's spinner pattern exactly, for visual consistency across the app. -->
-		<div role="status" data-testid="journal-loading" class="flex items-center gap-2 py-8 text-muted-foreground">
+<main class="mx-auto flex max-w-4xl flex-col gap-6 p-6">
+	<div>
+		<div class="mb-1 flex items-center gap-2">
+			<h1 class="text-2xl font-semibold tracking-tight">Session transcript</h1>
 			<span
-				aria-hidden="true"
-				class="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"
-			></span>
-			<span>Loading journal…</span>
+				data-testid="live-status"
+				class="rounded-full px-2 py-0.5 text-xs font-medium {store.active
+					? 'bg-emerald-500/15 text-emerald-600'
+					: 'bg-muted text-muted-foreground'}"
+			>
+				{store.active ? "Live" : "Disconnected"}
+			</span>
 		</div>
-	{:else if store.error}
-		<!-- Error state: the typed error's real `.message`, same destructive-box pattern as the sessions list route. -->
+		<p class="font-mono text-xs text-muted-foreground" data-testid="transcript-session-id">{sessionId}</p>
+	</div>
+
+	{#if store.error}
 		<div
 			role="alert"
-			data-testid="journal-error"
+			data-testid="transcript-error"
 			class="rounded-md border border-destructive/50 bg-destructive/10 p-4 text-destructive"
 		>
-			<p class="font-medium">Couldn't load the session journal</p>
+			<p class="font-medium">The live session connection failed</p>
 			<p class="text-sm">{store.error.message}</p>
 		</div>
-	{:else if store.events.length === 0}
-		<!-- Empty state: a freshly created session genuinely has no journal events yet — a normal outcome, not an error, and never a virtualized list rendering zero (awkward) rows. -->
-		<div data-testid="journal-empty" class="rounded-md border border-dashed p-10 text-center text-muted-foreground">
-			<p class="font-medium">No journal events yet</p>
-			<p class="text-sm">Events will show up here once this session starts recording its journal.</p>
+	{/if}
+
+	{#if transcriptRows.length === 0}
+		<div data-testid="transcript-empty" class="rounded-md border border-dashed p-10 text-center text-muted-foreground">
+			<p class="font-medium">No messages yet</p>
+			<p class="text-sm">Content will appear here as the session runs.</p>
 		</div>
 	{:else}
-		<div data-testid="journal-list" class="overflow-hidden rounded-md border">
-			<VList data={store.events} getKey={(item: StatusEvent) => item.journal_seq} style="height: 60vh;">
-				{#snippet children(item)}
-					<div data-testid="journal-event" class="border-b p-4 last:border-b-0">
-						<div class="flex items-center justify-between gap-2">
-							<span class="rounded bg-muted px-2 py-0.5 font-mono text-xs font-medium">
-								{item.event?.type ?? "unknown event"}
-							</span>
-							<span class="font-mono text-xs text-muted-foreground">seq {item.journal_seq}</span>
+		<div data-testid="transcript-list" class="overflow-hidden rounded-md border">
+			<VList
+				bind:this={vlistHandle}
+				id="transcript-scroll"
+				role="log"
+				data={transcriptRows}
+				getKey={(_item, index) => index}
+				onscroll={handleScroll}
+				style="height: 420px;"
+			>
+				{#snippet children(row)}
+					{#if row.kind === "text" || row.kind === "thinking"}
+						<div
+							data-testid="transcript-bubble"
+							data-chunk-type={row.kind}
+							class="border-b p-4 last:border-b-0 {row.kind === 'thinking' ? 'italic text-muted-foreground' : ''}"
+						>
+							<p class="whitespace-pre-wrap text-sm">{row.text}</p>
 						</div>
-						<dl class="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-							<dt class="text-muted-foreground">created_at</dt>
-							<dd class="font-mono text-xs">{formatTimestamp(item.event?.created_at)}</dd>
-							{#if item.event?.turn_id}
-								<dt class="text-muted-foreground">turn_id</dt>
-								<dd class="font-mono text-xs">{item.event.turn_id}</dd>
-							{/if}
-							{#if item.event?.step_id}
-								<dt class="text-muted-foreground">step_id</dt>
-								<dd class="font-mono text-xs">{item.event.step_id}</dd>
-							{/if}
-							{#if item.event?.loop_id}
-								<dt class="text-muted-foreground">loop_id</dt>
-								<dd class="font-mono text-xs">{item.event.loop_id}</dd>
-							{/if}
-							{#if item.event?.event_id}
-								<dt class="text-muted-foreground">event_id</dt>
-								<dd class="font-mono text-xs">{item.event.event_id}</dd>
-							{/if}
-							{#each extraFields(item.event) as [key, value] (key)}
-								<dt class="text-muted-foreground">{key}</dt>
-								<dd class="font-mono text-xs">{JSON.stringify(value)}</dd>
-							{/each}
-						</dl>
-					</div>
+					{:else if row.kind === "tool_use"}
+						<div data-testid="transcript-tool-use-chip" class="border-b p-4 text-xs text-muted-foreground last:border-b-0">
+							Constructing tool call: <span class="font-mono">{row.name}</span>
+						</div>
+					{/if}
 				{/snippet}
 			</VList>
 		</div>
+	{/if}
+
+	{#if store.view.toolCalls.length > 0}
+		<section data-testid="tool-calls" aria-label="Tool calls">
+			<h2 class="mb-2 text-sm font-semibold text-muted-foreground">Tool calls</h2>
+			<div class="flex flex-col gap-2">
+				{#each store.view.toolCalls as card, index (index)}
+					<div data-testid="tool-call-card" data-status={card.status} class="rounded-md border p-3 text-sm">
+						<div class="flex items-center justify-between gap-2">
+							<span class="font-mono text-xs font-medium">{card.toolName ?? "unknown tool"}</span>
+							<span
+								data-testid="tool-call-status"
+								class="rounded px-2 py-0.5 text-xs {card.status === 'completed'
+									? card.isError
+										? 'bg-destructive/15 text-destructive'
+										: 'bg-emerald-500/15 text-emerald-600'
+									: 'bg-amber-500/15 text-amber-600'}"
+							>
+								{card.status === "completed" ? (card.isError ? "failed" : "completed") : "started"}
+							</span>
+						</div>
+						{#if card.summary}
+							<p class="mt-1 text-xs text-muted-foreground">{card.summary}</p>
+						{/if}
+						{#if card.resultPreview}
+							<p class="mt-1 font-mono text-xs">{card.resultPreview}</p>
+						{/if}
+					</div>
+				{/each}
+			</div>
+		</section>
+	{/if}
+
+	{#if store.view.queuedInputs.length > 0 || store.view.compactions.length > 0}
+		<section data-testid="markers" aria-label="Session markers" class="flex flex-col gap-2">
+			{#each store.view.queuedInputs as marker, index (index)}
+				<div data-testid="queued-input-marker" class="rounded border border-dashed px-3 py-1 text-xs text-muted-foreground">
+					Input queued{marker.header?.created_at ? ` — ${marker.header.created_at}` : ""}
+				</div>
+			{/each}
+			{#each store.view.compactions as marker, index (index)}
+				<div data-testid="compaction-marker" class="rounded border border-dashed px-3 py-1 text-xs text-muted-foreground">
+					Compaction started (attempt {marker.attemptId})
+				</div>
+			{/each}
+		</section>
 	{/if}
 </main>

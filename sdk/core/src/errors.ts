@@ -176,3 +176,24 @@ export class MalformedResponseError extends Error {
     this.status = status;
   }
 }
+
+/**
+ * Thrown by a live SSE connection (live.ts's `FetchLiveFrameSource`) when the
+ * initial HTTP response itself is unusable as an event stream — a non-2xx
+ * status, or a 2xx response with no readable body. This is distinct from a
+ * mid-stream framing failure (sse.ts's `SseFrameError`, yielded in-band as an
+ * `ErrorSseFrame` rather than thrown, since the connection is still alive and
+ * subsequent frames may still be fine) and from `NetworkError` (fetch()
+ * itself never got a response at all, e.g. DNS/connection failure) — this
+ * error means a response WAS received, it's just not a stream this client can
+ * consume.
+ */
+export class LiveConnectionError extends Error {
+  readonly status: number | undefined;
+
+  constructor(message: string, options?: { status?: number; cause?: unknown }) {
+    super(message, options?.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "LiveConnectionError";
+    this.status = options?.status;
+  }
+}

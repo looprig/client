@@ -5,3 +5,4 @@
 // what this package owns (the reactive-wrapper layer) and deliberately does
 // not yet build (anything live/SSE, since sdk/core doesn't expose that yet).
 export * from "./session.svelte.js";
+export * from "./live-session.svelte.js";
