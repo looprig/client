@@ -39,11 +39,13 @@
 	import {
 		createBFFClient,
 		createFetchLiveFrameSource,
+		GATE_APPROVAL_ACTIONS,
 		type ContentDelta,
+		type GateApprovalAction,
 		type LiveFrameSource,
 		type LooprigTransport,
 	} from "@looprig/client";
-	import { LiveSessionViewStore } from "@looprig/svelte";
+	import { GateStore, LiveSessionViewStore, SessionComposerStore } from "@looprig/svelte";
 	import { VList, type VListHandle } from "virtua/svelte";
 
 	// Same override seams as Task 20's route: `transport`/`sid` let a
@@ -95,6 +97,64 @@
 		untrack(() => store.start());
 		return () => untrack(() => store.stop());
 	});
+
+	// --- Gate approval + composer (Task 29) ---
+	//
+	// `GateStore` polls `SessionStatus.waiting_gate_id` — the ONLY real source
+	// of "is a gate open right now": `SessionView`/the journal fold carries no
+	// gate state at all (`GatePrepared` is explicitly excluded from the
+	// journal page, and ephemeral frames don't cover gates either — see
+	// interaction.svelte.ts's own module comment for the full trail). Rebuilt
+	// alongside `store` whenever `sessionId` changes, same
+	// `untrack(() => transport)` + reactive-`sessionId` split.
+	const gateStore = $derived(new GateStore(untrack(() => transport), sessionId));
+	const composer = $derived(new SessionComposerStore(untrack(() => transport), sessionId));
+
+	// Same `untrack` reasoning as the live-join effect above: `start()`/`stop()`
+	// read/write `GateStore`'s own `$state` fields, and without `untrack` this
+	// effect would end up "subscribed" to its own store's polling state.
+	$effect(() => {
+		if (!sessionId) return;
+		untrack(() => gateStore.start());
+		return () => untrack(() => gateStore.stop());
+	});
+
+	/**
+	 * True whenever a gate is open. Per the harness read-plane's "at most one
+	 * open gate" model, a session with an open gate is paused waiting on a
+	 * human decision — submitting more input wouldn't advance anything and
+	 * would just queue up behind a turn that can't run yet — so this route's
+	 * UX choice is to disable the composer entirely while a gate is open,
+	 * rather than silently accept (and queue) a submission the user has no
+	 * reason to expect will do anything until they've answered the gate.
+	 */
+	const gateOpen = $derived(gateStore.waitingGateId !== null);
+
+	let composerText = $state("");
+	const composerDisabled = $derived(!sessionId || gateOpen || composer.submitting);
+
+	async function submitComposer(): Promise<void> {
+		if (await composer.submit(composerText)) {
+			composerText = "";
+		}
+	}
+
+	function handleComposerSubmit(event: SubmitEvent): void {
+		event.preventDefault();
+		void submitComposer();
+	}
+
+	/** Enter submits (matching common chat-composer convention); Shift+Enter inserts a newline. */
+	function handleComposerKeydown(event: KeyboardEvent): void {
+		if (event.key === "Enter" && !event.shiftKey) {
+			event.preventDefault();
+			void submitComposer();
+		}
+	}
+
+	function handleGateResponse(action: GateApprovalAction): void {
+		void gateStore.respond(action);
+	}
 
 	// --- Transcript rows: group consecutive same-kind content deltas into growing bubbles ---
 
@@ -205,6 +265,60 @@
 		<p class="font-mono text-xs text-muted-foreground" data-testid="transcript-session-id">{sessionId}</p>
 	</div>
 
+	{#if gateOpen}
+		<!--
+			Gate approval prompt: shown ONLY while `gateStore.waitingGateId` is
+			non-empty (SessionStatus's own field, not anything derived from the
+			transcript fold — see the module comment above `gateStore`'s
+			construction). Exactly three responses, per pkg/gate's own design
+			("Deny-before-allow, one combined approval with exactly Approve /
+			Approve always for this workspace / Deny") — these buttons dispatch
+			`GATE_APPROVAL_ACTIONS`' three exact wire strings verbatim, not an
+			invented label.
+		-->
+		<section
+			data-testid="gate-prompt"
+			role="alert"
+			aria-label="Gate approval required"
+			class="rounded-md border border-amber-500/50 bg-amber-500/10 p-4"
+		>
+			<p class="font-medium text-amber-700 dark:text-amber-400">Approval required</p>
+			<p class="text-sm text-muted-foreground">The session is waiting for your decision before it can continue.</p>
+			{#if gateStore.respondError}
+				<p data-testid="gate-error" class="mt-2 text-sm text-destructive">{gateStore.respondError.message}</p>
+			{/if}
+			<div class="mt-3 flex flex-wrap gap-2">
+				<button
+					type="button"
+					data-testid="gate-approve-button"
+					disabled={gateStore.responding}
+					onclick={() => handleGateResponse(GATE_APPROVAL_ACTIONS.approve)}
+					class="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+				>
+					Approve
+				</button>
+				<button
+					type="button"
+					data-testid="gate-approve-always-button"
+					disabled={gateStore.responding}
+					onclick={() => handleGateResponse(GATE_APPROVAL_ACTIONS.approveAlwaysWorkspace)}
+					class="rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+				>
+					Approve always for this workspace
+				</button>
+				<button
+					type="button"
+					data-testid="gate-deny-button"
+					disabled={gateStore.responding}
+					onclick={() => handleGateResponse(GATE_APPROVAL_ACTIONS.deny)}
+					class="rounded-md bg-destructive px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+				>
+					Deny
+				</button>
+			</div>
+		</section>
+	{/if}
+
 	{#if store.error}
 		<div
 			role="alert"
@@ -295,5 +409,39 @@
 				</div>
 			{/each}
 		</section>
+	{/if}
+
+	<!--
+		Composer: submits a single text content block via
+		`SessionComposerStore.submit` (interaction.svelte.ts), which wraps
+		`transport.submit(sessionId, { blocks: [textBlock(text)] })` — the exact
+		wire shape `content.TextBlock` (Go) decodes, verified against harness's
+		own `handlers_lifecycle_test.go` fixture (see content.ts's own doc
+		comment). Disabled while a gate is open (see `composerDisabled`'s doc
+		comment above) or while a submission is already in flight.
+	-->
+	<form data-testid="composer-form" class="flex items-end gap-2" onsubmit={handleComposerSubmit}>
+		<label class="sr-only" for="composer-input">Message</label>
+		<textarea
+			id="composer-input"
+			data-testid="composer-input"
+			bind:value={composerText}
+			onkeydown={handleComposerKeydown}
+			disabled={composerDisabled}
+			placeholder={gateOpen ? "Waiting for gate approval…" : "Send a message…"}
+			rows="2"
+			class="flex-1 resize-none rounded-md border p-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+		></textarea>
+		<button
+			type="submit"
+			data-testid="composer-submit"
+			disabled={composerDisabled || composerText.trim() === ""}
+			class="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+		>
+			{composer.submitting ? "Sending…" : "Send"}
+		</button>
+	</form>
+	{#if composer.error}
+		<p role="alert" data-testid="composer-error" class="text-sm text-destructive">{composer.error.message}</p>
 	{/if}
 </main>

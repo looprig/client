@@ -16,13 +16,22 @@
 import { page as browserPage } from "vitest/browser";
 import { describe, expect, it } from "vitest";
 import { render } from "vitest-browser-svelte";
+import { GATE_APPROVAL_ACTIONS } from "@looprig/client";
 import type {
+	CreateRequest,
+	CreateResponse,
+	CreateSessionOptions,
 	EventJournalPage,
+	GateAcceptedResponse,
+	GateResponseRequest,
+	InputResponse,
+	InterruptResponse,
 	ListSessionsOptions,
 	LiveFrameSource,
 	LooprigTransport,
 	ReadHistoryOptions,
 	RequestOptions,
+	RestoreResponse,
 	SessionList,
 	SessionStatus,
 	SseFrame,
@@ -33,18 +42,51 @@ const testSid = "44444444-4444-4444-4444-444444444444";
 
 // --- Fakes (mirroring sdk/core/test/join.test.ts's own doubles) ------------
 
+/** An `idle` status with no open gate — the default for every test that doesn't care about `GateStore`'s polling. */
+const idleStatus: SessionStatus = { session_id: testSid, last_journal_seq: 0, state: "idle" };
+
 class FakeTransport implements LooprigTransport {
 	/** Resolves immediately by default with an empty, "done" cold history page — most tests care only about the live half. */
 	readHistoryResult: Promise<EventJournalPage> = Promise.resolve({ events: [], next_journal_seq: 0, done: true });
+	/** `GateStore` polls this immediately on mount — default to an idle, no-gate status so tests that don't care about gates never see one. */
+	readStatusResult: Promise<SessionStatus> = Promise.resolve(idleStatus);
+	/** Never settles by default, so a test that doesn't wire this up never accidentally observes a submission complete. */
+	submitResult: Promise<InputResponse> = new Promise(() => {});
+	respondGateResult: Promise<GateAcceptedResponse> = new Promise(() => {});
+
+	readonly submitCalls: Array<{ sessionId: string; request: CreateRequest }> = [];
+	readonly respondGateCalls: Array<{ sessionId: string; gateId: string; request: GateResponseRequest }> = [];
 
 	listSessions(_options?: ListSessionsOptions): Promise<SessionList> {
 		throw new Error("not used by this route");
 	}
 	readStatus(_sessionId: string, _options?: RequestOptions): Promise<SessionStatus> {
-		throw new Error("not used by this route");
+		return this.readStatusResult;
 	}
 	readHistory(_sessionId: string, _options?: ReadHistoryOptions): Promise<EventJournalPage> {
 		return this.readHistoryResult;
+	}
+	createSession(_request?: CreateRequest, _options?: CreateSessionOptions): Promise<CreateResponse> {
+		throw new Error("not used by this route");
+	}
+	restoreSession(_sessionId: string, _options?: RequestOptions): Promise<RestoreResponse> {
+		throw new Error("not used by this route");
+	}
+	submit(sessionId: string, request: CreateRequest, _options?: RequestOptions): Promise<InputResponse> {
+		this.submitCalls.push({ sessionId, request });
+		return this.submitResult;
+	}
+	respondGate(
+		sessionId: string,
+		gateId: string,
+		request: GateResponseRequest,
+		_options?: RequestOptions,
+	): Promise<GateAcceptedResponse> {
+		this.respondGateCalls.push({ sessionId, gateId, request });
+		return this.respondGateResult;
+	}
+	interrupt(_sessionId: string, _options?: RequestOptions): Promise<InterruptResponse> {
+		throw new Error("not used by this route");
 	}
 }
 
@@ -365,5 +407,203 @@ describe("session detail route: stick-to-bottom autoscroll", () => {
 		await expect
 			.poll(() => scrollEl.scrollHeight - scrollEl.clientHeight - scrollEl.scrollTop)
 			.toBeLessThanOrEqual(48);
+	});
+});
+
+/** A promise plus its resolve/reject, so a test can control exactly when a fake transport call settles. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason: unknown) => void } {
+	let resolve!: (value: T) => void;
+	let reject!: (reason: unknown) => void;
+	const promise = new Promise<T>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+/** A `waiting_on_gate` status carrying an open gate, for the gate-UI tests below. */
+function waitingStatus(gateId: string): SessionStatus {
+	return { session_id: testSid, last_journal_seq: 0, state: "waiting_on_gate", waiting_gate_id: gateId };
+}
+
+describe("session detail route: composer", () => {
+	it("successful submit calls transport.submit with the correct wire shape and clears the input", async () => {
+		const transport = new FakeTransport();
+		const live = new FakeLiveSource();
+		transport.submitResult = Promise.resolve({ command_id: "55555555-5555-5555-5555-555555555555" });
+		render(SessionDetailPage, { transport, liveSource: live.open, sid: testSid });
+
+		const input = browserPage.getByTestId("composer-input");
+		await input.fill("hello world");
+		await browserPage.getByTestId("composer-submit").click();
+
+		await expect.poll(() => transport.submitCalls).toHaveLength(1);
+		expect(transport.submitCalls[0]).toEqual({
+			sessionId: testSid,
+			request: { blocks: [{ type: "text", Text: "hello world" }] },
+		});
+		await expect.element(input).toHaveValue("");
+	});
+
+	it("shows a loading/disabled state while the submission is in flight, then clears it", async () => {
+		const transport = new FakeTransport();
+		const live = new FakeLiveSource();
+		const inFlight = deferred<InputResponse>();
+		transport.submitResult = inFlight.promise;
+		render(SessionDetailPage, { transport, liveSource: live.open, sid: testSid });
+
+		const input = browserPage.getByTestId("composer-input");
+		await input.fill("hello");
+		const submitButton = browserPage.getByTestId("composer-submit");
+		await submitButton.click();
+
+		await expect.element(submitButton).toHaveTextContent("Sending…");
+		await expect.element(submitButton).toBeDisabled();
+		await expect.element(input).toBeDisabled();
+
+		inFlight.resolve({ command_id: "55555555-5555-5555-5555-555555555555" });
+
+		await expect.element(submitButton).toHaveTextContent("Send");
+		await expect.element(input).toHaveValue("");
+	});
+
+	it("shows the real typed error message on failure and leaves the input text untouched", async () => {
+		const transport = new FakeTransport();
+		const live = new FakeLiveSource();
+		// Attach a no-op handler immediately: this rejected promise sits in the
+		// field for several ticks (render, fill, click) before the composer
+		// actually awaits it, and the test runner reports an "unhandled
+		// rejection" for one with no attached handler at a microtask flush —
+		// even though it IS eventually handled (a promise may have more than
+		// one handler; the store's own await still observes the rejection).
+		const rejected = Promise.reject(new Error("session is not accepting input right now"));
+		rejected.catch(() => {});
+		transport.submitResult = rejected;
+		render(SessionDetailPage, { transport, liveSource: live.open, sid: testSid });
+
+		const input = browserPage.getByTestId("composer-input");
+		await input.fill("hello");
+		await browserPage.getByTestId("composer-submit").click();
+
+		await expect
+			.element(browserPage.getByTestId("composer-error"))
+			.toHaveTextContent("session is not accepting input right now");
+		// A failed submission doesn't discard what the user typed.
+		await expect.element(input).toHaveValue("hello");
+	});
+});
+
+describe("session detail route: gate approval", () => {
+	const gateId = "66666666-6666-6666-6666-666666666666";
+
+	it("no gate prompt when no gate is open", async () => {
+		const transport = new FakeTransport();
+		const live = new FakeLiveSource();
+		render(SessionDetailPage, { transport, liveSource: live.open, sid: testSid });
+
+		await expect.element(browserPage.getByTestId("live-status")).toHaveTextContent("Live");
+		await expect.element(browserPage.getByTestId("gate-prompt")).not.toBeInTheDocument();
+		await expect.element(browserPage.getByTestId("composer-input")).not.toBeDisabled();
+	});
+
+	it("renders the three-option prompt when a gate is open, and disables the composer", async () => {
+		const transport = new FakeTransport();
+		transport.readStatusResult = Promise.resolve(waitingStatus(gateId));
+		const live = new FakeLiveSource();
+		render(SessionDetailPage, { transport, liveSource: live.open, sid: testSid });
+
+		await expect.element(browserPage.getByTestId("gate-prompt")).toBeInTheDocument();
+		await expect.element(browserPage.getByTestId("gate-approve-button")).toHaveTextContent("Approve");
+		await expect
+			.element(browserPage.getByTestId("gate-approve-always-button"))
+			.toHaveTextContent("Approve always for this workspace");
+		await expect.element(browserPage.getByTestId("gate-deny-button")).toHaveTextContent("Deny");
+
+		// Composer-disabled-during-gate UX choice (see the route's own
+		// `composerDisabled` doc comment): a gate blocks further turns, so
+		// submitting more input while one is open wouldn't do anything useful.
+		await expect.element(browserPage.getByTestId("composer-input")).toBeDisabled();
+		await expect.element(browserPage.getByTestId("composer-submit")).toBeDisabled();
+	});
+
+	it("Approve calls respondGate with the exact opaque gate id and the exact 'Approve' action", async () => {
+		const transport = new FakeTransport();
+		transport.readStatusResult = Promise.resolve(waitingStatus(gateId));
+		const live = new FakeLiveSource();
+		render(SessionDetailPage, { transport, liveSource: live.open, sid: testSid });
+		await expect.element(browserPage.getByTestId("gate-prompt")).toBeInTheDocument();
+
+		transport.respondGateResult = Promise.resolve({});
+		transport.readStatusResult = Promise.resolve(idleStatus);
+		await browserPage.getByTestId("gate-approve-button").click();
+
+		await expect.poll(() => transport.respondGateCalls).toHaveLength(1);
+		expect(transport.respondGateCalls[0]).toEqual({
+			sessionId: testSid,
+			gateId,
+			request: { action: GATE_APPROVAL_ACTIONS.approve },
+		});
+		// The immediate re-poll after a successful response clears the prompt.
+		await expect.element(browserPage.getByTestId("gate-prompt")).not.toBeInTheDocument();
+	});
+
+	it("'Approve always for this workspace' calls respondGate with that exact action string", async () => {
+		const transport = new FakeTransport();
+		transport.readStatusResult = Promise.resolve(waitingStatus(gateId));
+		const live = new FakeLiveSource();
+		render(SessionDetailPage, { transport, liveSource: live.open, sid: testSid });
+		await expect.element(browserPage.getByTestId("gate-prompt")).toBeInTheDocument();
+
+		transport.respondGateResult = Promise.resolve({});
+		transport.readStatusResult = Promise.resolve(idleStatus);
+		await browserPage.getByTestId("gate-approve-always-button").click();
+
+		await expect.poll(() => transport.respondGateCalls).toHaveLength(1);
+		expect(transport.respondGateCalls[0]).toEqual({
+			sessionId: testSid,
+			gateId,
+			request: { action: GATE_APPROVAL_ACTIONS.approveAlwaysWorkspace },
+		});
+		expect(transport.respondGateCalls[0]!.request.action).toBe("Approve always for this workspace");
+	});
+
+	it("Deny calls respondGate with the exact 'Deny' action", async () => {
+		const transport = new FakeTransport();
+		transport.readStatusResult = Promise.resolve(waitingStatus(gateId));
+		const live = new FakeLiveSource();
+		render(SessionDetailPage, { transport, liveSource: live.open, sid: testSid });
+		await expect.element(browserPage.getByTestId("gate-prompt")).toBeInTheDocument();
+
+		transport.respondGateResult = Promise.resolve({});
+		transport.readStatusResult = Promise.resolve(idleStatus);
+		await browserPage.getByTestId("gate-deny-button").click();
+
+		await expect.poll(() => transport.respondGateCalls).toHaveLength(1);
+		expect(transport.respondGateCalls[0]).toEqual({
+			sessionId: testSid,
+			gateId,
+			request: { action: GATE_APPROVAL_ACTIONS.deny },
+		});
+	});
+
+	it("shows the real typed error message when a gate response fails, and keeps the prompt open", async () => {
+		const transport = new FakeTransport();
+		transport.readStatusResult = Promise.resolve(waitingStatus(gateId));
+		const live = new FakeLiveSource();
+		render(SessionDetailPage, { transport, liveSource: live.open, sid: testSid });
+		await expect.element(browserPage.getByTestId("gate-prompt")).toBeInTheDocument();
+
+		// See the composer failure test's own comment for why a no-op handler
+		// is attached immediately: `click()` has enough actionability-check
+		// ticks before it actually dispatches that a bare `Promise.reject(...)`
+		// gets flagged as unhandled otherwise, even though `respond()` does
+		// eventually await (and react to) this same rejection.
+		const rejected = Promise.reject(new Error("gate already resolved"));
+		rejected.catch(() => {});
+		transport.respondGateResult = rejected;
+		await browserPage.getByTestId("gate-deny-button").click();
+
+		await expect.element(browserPage.getByTestId("gate-error")).toHaveTextContent("gate already resolved");
+		await expect.element(browserPage.getByTestId("gate-prompt")).toBeInTheDocument();
 	});
 });

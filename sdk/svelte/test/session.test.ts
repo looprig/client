@@ -10,11 +10,19 @@
  */
 import { NetworkError } from "@looprig/client";
 import type {
+  CreateRequest,
+  CreateResponse,
+  CreateSessionOptions,
   EventJournalPage,
+  GateAcceptedResponse,
+  GateResponseRequest,
+  InputResponse,
+  InterruptResponse,
   ListSessionsOptions,
   LooprigTransport,
   ReadHistoryOptions,
   RequestOptions,
+  RestoreResponse,
   SessionList,
   SessionStatus,
 } from "@looprig/client";
@@ -51,6 +59,26 @@ class FakeTransport implements LooprigTransport {
   }
   readHistory(_sessionId: string, _options?: ReadHistoryOptions): Promise<EventJournalPage> {
     return this.readHistoryResult;
+  }
+  createSession(_request?: CreateRequest, _options?: CreateSessionOptions): Promise<CreateResponse> {
+    throw new Error("not used by these tests");
+  }
+  restoreSession(_sessionId: string, _options?: RequestOptions): Promise<RestoreResponse> {
+    throw new Error("not used by these tests");
+  }
+  submit(_sessionId: string, _request: CreateRequest, _options?: RequestOptions): Promise<InputResponse> {
+    throw new Error("not used by these tests");
+  }
+  respondGate(
+    _sessionId: string,
+    _gateId: string,
+    _request: GateResponseRequest,
+    _options?: RequestOptions,
+  ): Promise<GateAcceptedResponse> {
+    throw new Error("not used by these tests");
+  }
+  interrupt(_sessionId: string, _options?: RequestOptions): Promise<InterruptResponse> {
+    throw new Error("not used by these tests");
   }
 }
 

@@ -12,11 +12,19 @@ import { describe, expect, it } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { NetworkError } from "@looprig/client";
 import type {
+	CreateRequest,
+	CreateResponse,
+	CreateSessionOptions,
 	EventJournalPage,
+	GateAcceptedResponse,
+	GateResponseRequest,
+	InputResponse,
+	InterruptResponse,
 	ListSessionsOptions,
 	LooprigTransport,
 	ReadHistoryOptions,
 	RequestOptions,
+	RestoreResponse,
 	SessionList,
 	SessionStatus,
 } from "@looprig/client";
@@ -33,6 +41,26 @@ class FakeTransport implements LooprigTransport {
 		throw new Error("not used by this route");
 	}
 	readHistory(_sessionId: string, _options?: ReadHistoryOptions): Promise<EventJournalPage> {
+		throw new Error("not used by this route");
+	}
+	createSession(_request?: CreateRequest, _options?: CreateSessionOptions): Promise<CreateResponse> {
+		throw new Error("not used by this route");
+	}
+	restoreSession(_sessionId: string, _options?: RequestOptions): Promise<RestoreResponse> {
+		throw new Error("not used by this route");
+	}
+	submit(_sessionId: string, _request: CreateRequest, _options?: RequestOptions): Promise<InputResponse> {
+		throw new Error("not used by this route");
+	}
+	respondGate(
+		_sessionId: string,
+		_gateId: string,
+		_request: GateResponseRequest,
+		_options?: RequestOptions,
+	): Promise<GateAcceptedResponse> {
+		throw new Error("not used by this route");
+	}
+	interrupt(_sessionId: string, _options?: RequestOptions): Promise<InterruptResponse> {
 		throw new Error("not used by this route");
 	}
 }

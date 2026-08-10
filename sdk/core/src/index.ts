@@ -18,6 +18,8 @@ export * from "./sse.js";
 export * from "./fold.js";
 export * from "./join.js";
 export * from "./live.js";
+export * from "./content.js";
+export * from "./gate-actions.js";
 export {
   allSchemas,
   capabilitiesSchema,
