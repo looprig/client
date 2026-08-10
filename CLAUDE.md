@@ -49,6 +49,11 @@ approval in the current conversation; record approvals here.
 - `virtua` — transcript virtualization
 - `shiki` — code highlighting
 - `svelte-exmarkdown` — markdown rendering
+- `@types/node` (dev only) — types for `node:*` APIs (`node:fs`, `node:http`,
+  `node:url`) used by sdk/core's test suite (real HTTP round-trip tests
+  against BFFTransport); types-only, ships nothing at runtime. Resolves
+  Task 15's flagged gap where test files used `node:*` imports outside
+  `tsc`'s checked scope.
 
 **Explicitly NOT approved:** `invopop/jsonschema` (serve owns its hand-authored
 schema), `json-schema-to-zod`, `@ai-sdk/svelte`'s transport, anything pulling the

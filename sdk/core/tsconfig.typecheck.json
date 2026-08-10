@@ -1,0 +1,26 @@
+{
+  // Extends the build config (src-only, rootDir "src", emits dist/) with the
+  // test/ directory added and `types: ["node"]` enabled, so `npm run
+  // typecheck` actually checks test files that import `node:*` APIs
+  // (node:fs, node:url, node:http) instead of silently excluding them — see
+  // sdk/core/src/errors.ts's and transport.ts's neighboring test files. Kept
+  // as a SEPARATE config from tsconfig.json (rather than widening that one's
+  // "include") because tsconfig.json's rootDir "src" would make `tsc -p
+  // tsconfig.json` (the build script) fail with TS6059 the moment test/
+  // is added to its include — build and typecheck have different scopes on
+  // purpose: build only ever emits sdk/core's published src, typecheck
+  // additionally verifies (with --noEmit, nothing here is ever emitted) that
+  // the test suite itself still type-checks.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // rootDir is overridden to the package root (rather than inheriting
+    // "src") because test/ sits alongside, not under, src/ — with the base
+    // config's rootDir, tsc rejects the program with TS6059 ("File is not
+    // under rootDir") the moment test/ is added to include, even with
+    // noEmit: true (the rootDir consistency check isn't emit-gated).
+    "rootDir": ".",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src", "test"]
+}

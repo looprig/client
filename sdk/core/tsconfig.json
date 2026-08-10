@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    // "DOM" supplies fetch/Response/RequestInit/Headers/AbortSignal/
+    // URLSearchParams — the real browser types transport.ts's BFFTransport is
+    // written against (SPEC framing: "same-origin browser apps"). This is a
+    // TypeScript-bundled lib, not a new dependency.
+    "lib": ["ES2022", "DOM"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "rootDir": "src",
