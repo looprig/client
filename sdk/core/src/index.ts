@@ -16,6 +16,7 @@ export * from "./transport.js";
 export * from "./client.js";
 export * from "./sse.js";
 export * from "./fold.js";
+export * from "./join.js";
 export {
   allSchemas,
   capabilitiesSchema,
