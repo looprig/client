@@ -1,14 +1,18 @@
+import tailwindcss from '@tailwindcss/vite';
+import { playwright } from '@vitest/browser-playwright';
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
 	plugins: [
+		tailwindcss(),
 		sveltekit({
 			compilerOptions: {
 				// Force runes mode for the project, except for libraries. Can be removed in svelte 6.
 				runes: ({ filename }) => filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
+
 			adapter: adapter({
 				// Build output lands directly in pkg/webui/dist, which pkg/webui
 				// embeds via //go:embed dist (see ../pkg/webui/webui.go). Both
@@ -37,5 +41,35 @@ export default defineConfig({
 			// BFF without CORS while vite dev serves the app itself.
 			'/api': 'http://127.0.0.1:8080'
 		}
+	},
+	test: {
+		// Svelte 5 component tests need a real browser DOM (not jsdom) to
+		// mount `.svelte` files — this is `sv add vitest=usages:component`'s
+		// current (verified empirically 2026-08-10, shadcn-svelte/sv CLI
+		// v0.17.0) scaffold: `vitest-browser-svelte`'s `render()` +
+		// `@vitest/browser-playwright` driving a real headless Chromium via
+		// Playwright, not `@testing-library/svelte` + jsdom (the task brief's
+		// suggested "common current approach" is out of date for Svelte 5 —
+		// flagged in the task report). This, `@vitest/browser-playwright`,
+		// and `playwright` itself (a real browser binary, fetched once via
+		// `npx playwright install chromium`, not just an npm package) are new
+		// dependencies this task adds and are NOT yet in CLAUDE.md's approved
+		// npm list — flagged for sign-off, same pattern Task 18 used for
+		// `vite-plugin-svelte`.
+		expect: { requireAssertions: true },
+		projects: [
+			{
+				extends: './vite.config.ts',
+				test: {
+					name: 'client',
+					browser: {
+						enabled: true,
+						provider: playwright(),
+						instances: [{ browser: 'chromium', headless: true }]
+					},
+					include: ['src/**/*.svelte.{test,spec}.{js,ts}']
+				}
+			}
+		]
 	}
 });
