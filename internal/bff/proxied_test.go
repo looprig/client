@@ -5,12 +5,11 @@ package bff_test
 // the stub deliberately, so the tests can prove the proxy's transport is wired
 // with real certificate verification (MinVersion TLS 1.2, no InsecureSkipVerify)
 // rather than merely asserting it by reading the source: the stub's certificate is
-// trusted via WithRootCAs (a proper cert-pool addition), never by disabling
+// trusted via WithRootCA (a proper additive trust-store extension), never by disabling
 // verification.
 
 import (
 	"context"
-	"crypto/x509"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -79,7 +78,7 @@ func (u *upstreamStub) last() (recordedRequest, bool) {
 }
 
 // newTrustingProxiedSource starts a TLS upstream stub and builds a ReadSource
-// pointed at it, trusting the stub's certificate via WithRootCAs — the correct
+// pointed at it, trusting the stub's certificate via WithRootCA — the correct
 // alternative to InsecureSkipVerify. It returns the source and the stub for
 // assertions, and registers cleanup to close the stub.
 func newTrustingProxiedSource(t *testing.T, stub *upstreamStub) bff.ReadSource {
@@ -88,15 +87,12 @@ func newTrustingProxiedSource(t *testing.T, stub *upstreamStub) bff.ReadSource {
 	ts := httptest.NewTLSServer(stub)
 	t.Cleanup(ts.Close)
 
-	pool := x509.NewCertPool()
-	pool.AddCert(ts.Certificate())
-
 	upstreamURL, err := url.Parse(ts.URL)
 	if err != nil {
 		t.Fatalf("url.Parse(%q) err = %v", ts.URL, err)
 	}
 
-	src, err := bff.NewProxiedReadSource(upstreamURL, configuredToken, bff.WithRootCAs(pool))
+	src, err := bff.NewProxiedReadSource(upstreamURL, configuredToken, bff.WithRootCA(ts.Certificate()))
 	if err != nil {
 		t.Fatalf("NewProxiedReadSource() err = %v", err)
 	}

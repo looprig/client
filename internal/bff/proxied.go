@@ -23,13 +23,28 @@ const proxiedUpstreamTimeout = 15 * time.Second
 // host's standard CA pool, as production wiring should.
 type ProxiedReadSourceOption func(*tls.Config)
 
-// WithRootCAs adds pool as an ADDITIONAL trusted root CA pool for the upstream TLS
-// connection, on top of (never instead of) certificate verification. It exists so
-// tests can point the proxy at an httptest.NewTLSServer stub and have the real
-// transport trust that stub's self-signed certificate — the correct alternative to
-// setting InsecureSkipVerify, which this package never does.
-func WithRootCAs(pool *x509.CertPool) ProxiedReadSourceOption {
+// WithRootCA adds cert as an ADDITIONAL trusted root certificate for the
+// upstream TLS connection, on top of (never instead of) the host's standard CA
+// pool. It exists so tests can point the proxy at an httptest.NewTLSServer stub
+// and have the real transport trust that stub's self-signed certificate — the
+// correct alternative to setting InsecureSkipVerify, which this package never
+// does.
+//
+// The implementation clones the system trust store and adds cert to the clone,
+// rather than replacing tls.Config.RootCAs outright: per crypto/tls semantics,
+// setting RootCAs to a pool containing only cert would make cert the SOLE
+// trusted root, silently dropping every public-CA-signed root the host
+// otherwise trusts. x509.CertPool exposes no API to merge two pools, so a
+// single extra certificate (rather than an arbitrary caller-supplied pool) is
+// the option's unit of composition — it can always be added onto a fresh clone
+// of the system pool.
+func WithRootCA(cert *x509.Certificate) ProxiedReadSourceOption {
 	return func(cfg *tls.Config) {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		pool.AddCert(cert)
 		cfg.RootCAs = pool
 	}
 }
