@@ -33,6 +33,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -109,6 +110,10 @@ func (g *CSRFGuard) Wrap(next http.Handler) http.Handler {
 		}
 		token := r.Header.Get(CSRFHeaderName)
 		if token == "" || !g.verify(token) {
+			// Log the request's method/path for audit purposes only — never the
+			// submitted or expected token value, which would leak the secret this
+			// guard exists to protect.
+			slog.Warn("bff: rejected request: missing or invalid csrf token", "method", r.Method, "path", r.URL.Path)
 			http.Error(w, "forbidden: missing or invalid CSRF token", http.StatusForbidden)
 			return
 		}

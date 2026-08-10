@@ -15,6 +15,7 @@ package bff
 // present, the Origin header. Both must name one of a small set of allowed hosts.
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -59,6 +60,7 @@ func NewHostOriginGuard(extraAllowedHosts ...string) *HostOriginGuard {
 func (g *HostOriginGuard) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !g.hostAllowed(r.Host) {
+			slog.Warn("bff: rejected request: host not allowed", "host", r.Host)
 			http.Error(w, "forbidden: host not allowed", http.StatusForbidden)
 			return
 		}
@@ -67,6 +69,7 @@ func (g *HostOriginGuard) Wrap(next http.Handler) http.Handler {
 		// Only a request that HAS an Origin pointing somewhere else is
 		// rejected.
 		if origin := r.Header.Get("Origin"); origin != "" && !g.originAllowed(origin) {
+			slog.Warn("bff: rejected request: origin not allowed", "host", r.Host, "origin", origin)
 			http.Error(w, "forbidden: origin not allowed", http.StatusForbidden)
 			return
 		}

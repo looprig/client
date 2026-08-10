@@ -16,6 +16,45 @@ import (
 	"github.com/looprig/client/internal/bff"
 )
 
+// TestCSRFGuardLogsRejection covers CLAUDE.md's "audit auth failures,
+// permission denials, and unexpected inputs" requirement: a rejected
+// (missing/unknown) CSRF token must emit a structured log line naming the
+// request's method and path, and MUST NOT include the token value itself,
+// submitted or expected. Deliberately not t.Parallel() — see
+// withCapturedLogs in guard_test.go, which this test reuses.
+func TestCSRFGuardLogsRejection(t *testing.T) {
+	buf := withCapturedLogs(t)
+
+	guard := bff.NewCSRFGuard(time.Hour)
+	valid, err := guard.Mint()
+	if err != nil {
+		t.Fatalf("Mint() error = %v", err)
+	}
+	handler := guard.Wrap(okHandler)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/abc/input", nil)
+	req.Header.Set(bff.CSRFHeaderName, "not-a-real-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "invalid csrf token") {
+		t.Errorf("log output = %q, want a line about the rejected csrf token", out)
+	}
+	if !strings.Contains(out, http.MethodPost) || !strings.Contains(out, "/v1/sessions/abc/input") {
+		t.Errorf("log output = %q, want it to name the request method and path", out)
+	}
+	if strings.Contains(out, "not-a-real-token") {
+		t.Errorf("log output = %q, must never contain the submitted token value", out)
+	}
+	if strings.Contains(out, valid) {
+		t.Errorf("log output = %q, must never contain the expected/valid token value", out)
+	}
+}
+
 func TestCSRFGuardMint(t *testing.T) {
 	t.Parallel()
 
