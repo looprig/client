@@ -55,3 +55,6 @@ contract:
 
 sdk:
 	npm ci && npm run build -w sdk/core && npm run test -w sdk/core
+
+app:
+	npm ci && npm run build -w app
