@@ -52,8 +52,9 @@ type Config struct {
 	HostEnabled bool
 }
 
-// String implements fmt.Stringer, redacting HostToken. Covers %v, %s, and (via
-// the same method, since Config defines no separate GoString) the %+v verb.
+// String implements fmt.Stringer, redacting HostToken. Covers %v, %s, and
+// %+v, since %+v never consults GoString (only %#v does) — the same method
+// covers it.
 func (c Config) String() string {
 	return fmt.Sprintf("config.Config{Addr:%q, Store:%q, HostURL:%q, HostToken:%s, HostEnabled:%t}",
 		c.Addr, c.Store, c.HostURL, redactedToken(c.HostToken), c.HostEnabled)
