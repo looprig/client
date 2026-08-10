@@ -169,6 +169,80 @@ func TestProxiedReadSourceAllowlistedPathReachesUpstream(t *testing.T) {
 	}
 }
 
+// TestProxiedReadSourceCapabilitiesReachesUpstream proves the /v1/capabilities
+// route — otherwise only exercised on its rejection side (wrong method) — is
+// actually wired to the allowlist mux and reaches upstream, with the response
+// flowing back to the caller correctly. Same pattern as
+// TestProxiedReadSourceAllowlistedPathReachesUpstream.
+func TestProxiedReadSourceCapabilitiesReachesUpstream(t *testing.T) {
+	t.Parallel()
+
+	stub := &upstreamStub{body: `{"readOnly":false}`}
+	src := newTrustingProxiedSource(t, stub)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/capabilities", nil)
+	rec := httptest.NewRecorder()
+	src.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/capabilities status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), `{"readOnly":false}`; got != want {
+		t.Errorf("GET /v1/capabilities body = %q, want %q", got, want)
+	}
+	if got := stub.requestCount(); got != 1 {
+		t.Fatalf("upstream requestCount = %d, want 1", got)
+	}
+	last, ok := stub.last()
+	if !ok {
+		t.Fatalf("upstream recorded no request")
+	}
+	if last.method != http.MethodGet || last.path != "/v1/capabilities" {
+		t.Errorf("upstream recorded method=%s path=%s, want GET /v1/capabilities", last.method, last.path)
+	}
+	if got := last.header.Get("Authorization"); got != "Bearer "+configuredToken {
+		t.Errorf("upstream Authorization = %q, want %q", got, "Bearer "+configuredToken)
+	}
+}
+
+// TestProxiedReadSourceJournalReachesUpstream proves the
+// /v1/sessions/{sid}/journal route — otherwise only exercised on its
+// rejection side — is actually wired to the allowlist mux and reaches
+// upstream, with the {sid} wildcard segment forwarded intact and the response
+// flowing back to the caller correctly. Same pattern as
+// TestProxiedReadSourceAllowlistedPathReachesUpstream.
+func TestProxiedReadSourceJournalReachesUpstream(t *testing.T) {
+	t.Parallel()
+
+	stub := &upstreamStub{body: `{"events":[]}`}
+	src := newTrustingProxiedSource(t, stub)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/sessions/"+fixedSID+"/journal", nil)
+	rec := httptest.NewRecorder()
+	src.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/sessions/%s/journal status = %d, want %d; body = %s", fixedSID, rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), `{"events":[]}`; got != want {
+		t.Errorf("GET /v1/sessions/%s/journal body = %q, want %q", fixedSID, got, want)
+	}
+	if got := stub.requestCount(); got != 1 {
+		t.Fatalf("upstream requestCount = %d, want 1", got)
+	}
+	last, ok := stub.last()
+	if !ok {
+		t.Fatalf("upstream recorded no request")
+	}
+	wantPath := "/v1/sessions/" + fixedSID + "/journal"
+	if last.method != http.MethodGet || last.path != wantPath {
+		t.Errorf("upstream recorded method=%s path=%s, want GET %s", last.method, last.path, wantPath)
+	}
+	if got := last.header.Get("Authorization"); got != "Bearer "+configuredToken {
+		t.Errorf("upstream Authorization = %q, want %q", got, "Bearer "+configuredToken)
+	}
+}
+
 // TestProxiedReadSourceRefusesDisallowedRequests covers requirement 1's
 // security-relevant property: a disallowed method or path is refused by the proxy
 // itself, BEFORE any network call reaches upstream. Zero upstream requests is the
