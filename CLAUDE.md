@@ -55,6 +55,46 @@ approval in the current conversation; record approvals here.
   Task 15's flagged gap where test files used `node:*` imports outside
   `tsc`'s checked scope.
 
+**npm — Svelte/Vite tooling (dev only, Tasks 17-18):**
+- `@sveltejs/vite-plugin-svelte` — the Vite plugin that compiles `.svelte`/
+  `.svelte.ts` rune syntax; required Vite+Svelte integration glue with no
+  functional alternative. Used by sdk/svelte and app's Vite pipelines.
+
+**npm — shadcn-svelte/Tailwind UI stack (Task 19, from `npx shadcn-svelte
+init`):** the standard shadcn-svelte + Tailwind v4 toolchain, all dev-only in
+`app`:
+- `@tailwindcss/vite` — Tailwind's Vite plugin (Tailwind v4's supported
+  integration path, replacing the old PostCSS config flow).
+- `tailwindcss` — the utility CSS framework shadcn-svelte's generated
+  components are styled against.
+- `clsx` — small conditional-classname helper; used by shadcn-svelte's
+  generated `cn()` utility.
+- `tailwind-merge` — resolves conflicting Tailwind class names (also used by
+  `cn()`); required alongside `clsx` for shadcn-svelte's generated components
+  to compose class overrides correctly.
+- `tailwind-variants` — variant-based component styling used by shadcn-svelte's
+  generated components (e.g. button/badge variants).
+- `tw-animate-css` — Tailwind v4-compatible animation utility classes shadcn-
+  svelte's generated components reference (the old `tailwindcss-animate`
+  plugin doesn't support Tailwind v4).
+- `@fontsource-variable/inter` — self-hosted variable-weight Inter font,
+  shadcn-svelte init's default typeface; avoids a runtime dependency on an
+  external font CDN.
+- `@lucide/svelte` — icon library, installed via shadcn-svelte init's default
+  icon-library choice. Currently installed but unused: not yet referenced
+  anywhere under `app/src`. Left in place (not removed) since UI work adding
+  icons is expected in a future task.
+
+**npm — Component testing (approved, dev only):**
+- `vitest-browser-svelte`, `@vitest/browser-playwright`, `playwright` — the
+  approved browser-based component-testing stack, run through Vitest's
+  browser mode against a real Svelte-compiled component in a real browser
+  engine, rather than a DOM-shim unit test. `playwright` requires a one-time
+  real browser binary download (`npx playwright install chromium`,
+  ~270MB) that is NOT part of `npm install`; developers and CI must run it
+  explicitly. All three are devDependency-only and never ship in the
+  production build.
+
 **Explicitly NOT approved:** `invopop/jsonschema` (serve owns its hand-authored
 schema), `json-schema-to-zod`, `@ai-sdk/svelte`'s transport, anything pulling the
 charm/TUI stack (`github.com/looprig/tui`), and `swe` or any agent implementation.
