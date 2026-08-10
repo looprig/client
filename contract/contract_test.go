@@ -39,10 +39,13 @@ func TestContractMatchesPinnedHarness(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read upstream %s: %v", dir, err)
 		}
+		upstreamNames := make(map[string]struct{}, len(entries))
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
 			}
+			upstreamNames[e.Name()] = struct{}{}
+
 			want, err := os.ReadFile(filepath.Join(upstream, dir, e.Name()))
 			if err != nil {
 				t.Fatalf("read upstream %s/%s: %v", dir, e.Name(), err)
@@ -54,6 +57,23 @@ func TestContractMatchesPinnedHarness(t *testing.T) {
 			}
 			if !bytes.Equal(got, want) {
 				t.Errorf("%s/%s differs from pinned harness (run `make contract`)", dir, e.Name())
+			}
+		}
+
+		// Reverse pass: a vendored file with no upstream counterpart means the
+		// file was removed or renamed upstream and contract/ silently kept a
+		// stale, no-longer-authoritative copy. The forward loop above can never
+		// catch this since it only ever walks upstream names.
+		local, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("read local %s: %v", dir, err)
+		}
+		for _, e := range local {
+			if e.IsDir() {
+				continue
+			}
+			if _, ok := upstreamNames[e.Name()]; !ok {
+				t.Errorf("vendored %s/%s no longer exists upstream (removed or renamed; run `make contract`)", dir, e.Name())
 			}
 		}
 	}
