@@ -316,6 +316,79 @@ describe("foldEphemeral: tool call pairing across started + completed", () => {
       completedHeader: undefined,
     });
   });
+
+  it("a tool_call_completed that arrives BEFORE its tool_call_started (join-window race / event reordering) still resolves to exactly 1 card, not 2 — regression for the one-directional pairing bug", () => {
+    const id = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+    const completed = validateEphemeralFrame({
+      v: 1,
+      kind: "tool_call_completed",
+      delta: { tool_execution_id: id, is_error: false, result_preview: "done" },
+    });
+    const started = validateEphemeralFrame({
+      v: 1,
+      kind: "tool_call_started",
+      delta: { tool_execution_id: id, tool_name: "bash", summary: "ls -la" },
+    });
+
+    // Before the fix: `completed` (no match) appends a completed-only card;
+    // `started` (unconditionally appends) then adds a SECOND, permanently
+    // "started" card — 2 cards for 1 execution.
+    const afterCompleted = expectOk(fold(emptySessionView(), { segment: "live", frame: { type: "ephemeral", data: completed } }));
+    const afterStarted = expectOk(fold(afterCompleted, { segment: "live", frame: { type: "ephemeral", data: started } }));
+
+    expect(afterStarted.toolCalls).toHaveLength(1);
+    expect(afterStarted.toolCalls[0]).toEqual({
+      toolExecutionId: id,
+      status: "completed", // completion is not regressed by a later-arriving started
+      toolName: "bash", // filled in from the started frame
+      summary: "ls -la", // filled in from the started frame
+      isError: false, // preserved from the completed frame
+      resultPreview: "done", // preserved from the completed frame
+      startedHeader: undefined,
+      completedHeader: undefined,
+    });
+  });
+
+  it("a duplicate tool_call_started for the same id merges into the existing card instead of orphaning it — regression for the one-directional pairing bug", () => {
+    const id = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+    const started1 = validateEphemeralFrame({
+      v: 1,
+      kind: "tool_call_started",
+      delta: { tool_execution_id: id, tool_name: "bash", summary: "ls -la" },
+    });
+    const started2 = validateEphemeralFrame({
+      v: 1,
+      kind: "tool_call_started",
+      delta: { tool_execution_id: id, tool_name: "bash", summary: "ls -la" }, // at-least-once redelivery
+    });
+    const completed = validateEphemeralFrame({
+      v: 1,
+      kind: "tool_call_completed",
+      delta: { tool_execution_id: id, is_error: false, result_preview: "ok" },
+    });
+
+    // Before the fix: the completed-handler's findIndex only ever matches the
+    // FIRST "started" card it finds; a duplicate started card is invisible to
+    // it (findIndex stops at the first match), so `started2` would be
+    // orphaned — stuck at status "started" forever, never resolved by the
+    // eventual completed frame.
+    const afterFirst = expectOk(fold(emptySessionView(), { segment: "live", frame: { type: "ephemeral", data: started1 } }));
+    const afterSecond = expectOk(fold(afterFirst, { segment: "live", frame: { type: "ephemeral", data: started2 } }));
+    expect(afterSecond.toolCalls).toHaveLength(1); // duplicate started merged, not appended
+
+    const afterCompleted = expectOk(fold(afterSecond, { segment: "live", frame: { type: "ephemeral", data: completed } }));
+    expect(afterCompleted.toolCalls).toHaveLength(1); // still exactly 1: correctly resolved to completed
+    expect(afterCompleted.toolCalls[0]).toEqual({
+      toolExecutionId: id,
+      status: "completed",
+      toolName: "bash",
+      summary: "ls -la",
+      isError: false,
+      resultPreview: "ok",
+      startedHeader: undefined,
+      completedHeader: undefined,
+    });
+  });
 });
 
 describe("fold(): live heartbeat and error SseFrames", () => {

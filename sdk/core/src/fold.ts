@@ -120,10 +120,31 @@ export type ContentDelta = TextContentDelta | ThinkingContentDelta | ToolUseCont
  * One tool call's execution lifecycle, built by folding a `tool_call_started`
  * frame and (when it arrives) the matching `tool_call_completed` frame into a
  * single card. `toolExecutionId` is the join key when both frames carry it
- * (`omitzero` on the wire, so it can legitimately be absent); when a
- * `tool_call_completed` can't be matched to a prior `started` card (missing
- * id, or arriving without ever seeing a `started` — e.g. mid-stream join), a
- * new completed-only card is appended rather than the update being dropped.
+ * (`omitzero` on the wire, so it can legitimately be absent); when a frame
+ * can't be matched to a prior card for the same id (missing id, or arriving
+ * without ever seeing the other half — e.g. mid-stream join), a new
+ * single-sided card is appended rather than the update being dropped.
+ *
+ * Matching is symmetric and id-based (NOT status-based): both
+ * `tool_call_started` and `tool_call_completed` search for ANY existing card
+ * with the same `toolExecutionId`, regardless of that card's current
+ * `status`, and merge into it in place rather than ever appending a second
+ * card for an id already represented. This matters for two real event orders
+ * this SDK cannot rule out (ephemeral frames are best-effort/at-least-once,
+ * per sse.ts/fold.ts's own module comments, and a join-window race can
+ * reorder arrival relative to real time — see join.ts):
+ *  - `tool_call_completed` arriving BEFORE its `tool_call_started` counterpart:
+ *    the completed-only card `tool_call_started` later matches against is
+ *    filled in with the started-only fields (`toolName`/`summary`/
+ *    `startedHeader`) without regressing `status` back to `"started"` —
+ *    completion is the more advanced state and is never undone by a
+ *    later-arriving start.
+ *  - a duplicate `tool_call_started` (or `tool_call_completed`) for an id
+ *    already represented: merged into the existing card (overwriting that
+ *    frame's own fields with the newer occurrence) rather than orphaning a
+ *    second card that can never be resolved. A true duplicate carries
+ *    identical data anyway, so overwriting is always safe; a legitimately
+ *    corrected resend is reflected rather than silently ignored.
  */
 export interface ToolCallCard {
   toolExecutionId: string | undefined;
@@ -308,6 +329,19 @@ function optionalBoolean(v: unknown): boolean | undefined {
   return typeof v === "boolean" ? v : undefined;
 }
 
+/**
+ * Finds the index of an existing `ToolCallCard` sharing `toolExecutionId`,
+ * regardless of that card's current `status` — shared by both
+ * `tool_call_started` and `tool_call_completed` so pairing is symmetric (see
+ * the `ToolCallCard` doc comment). Returns -1 (always append a new card,
+ * never merge) when the id is absent, matching the pre-existing behavior for
+ * frames that carry no `tool_execution_id` at all.
+ */
+function findToolCallCardIndex(view: SessionView, toolExecutionId: string | undefined): number {
+  if (toolExecutionId === undefined) return -1;
+  return view.toolCalls.findIndex((c) => c.toolExecutionId === toolExecutionId);
+}
+
 // --- Ephemeral fold -----------------------------------------------------------
 
 /**
@@ -330,17 +364,35 @@ function foldEphemeral(view: SessionView, frame: EphemeralFrame): FoldResult {
 
     case "tool_call_started": {
       const toolExecutionId = optionalString(delta?.["tool_execution_id"]);
-      const card: ToolCallCard = {
-        toolExecutionId,
-        status: "started",
-        toolName: optionalString(delta?.["tool_name"]),
-        summary: optionalString(delta?.["summary"]),
-        isError: undefined,
-        resultPreview: undefined,
-        startedHeader: header,
-        completedHeader: undefined,
-      };
-      return { ok: true, view: { ...view, toolCalls: [...view.toolCalls, card] } };
+      const toolName = optionalString(delta?.["tool_name"]);
+      const summary = optionalString(delta?.["summary"]);
+
+      const matchIndex = findToolCallCardIndex(view, toolExecutionId);
+
+      if (matchIndex === -1) {
+        const card: ToolCallCard = {
+          toolExecutionId,
+          status: "started",
+          toolName,
+          summary,
+          isError: undefined,
+          resultPreview: undefined,
+          startedHeader: header,
+          completedHeader: undefined,
+        };
+        return { ok: true, view: { ...view, toolCalls: [...view.toolCalls, card] } };
+      }
+
+      // A card for this id already exists (see the ToolCallCard doc comment
+      // for why this branch exists at all): merge the started-only fields in
+      // place rather than appending a second card. `status` is intentionally
+      // NOT reset to "started" here — if the existing card is already
+      // "completed" (the completed frame arrived first), that is the more
+      // advanced state and must not regress.
+      const toolCalls = [...view.toolCalls];
+      const prior = toolCalls[matchIndex]!;
+      toolCalls[matchIndex] = { ...prior, toolName, summary, startedHeader: header };
+      return { ok: true, view: { ...view, toolCalls } };
     }
 
     case "tool_call_completed": {
@@ -348,10 +400,7 @@ function foldEphemeral(view: SessionView, frame: EphemeralFrame): FoldResult {
       const isError = optionalBoolean(delta?.["is_error"]);
       const resultPreview = optionalString(delta?.["result_preview"]);
 
-      const matchIndex =
-        toolExecutionId === undefined
-          ? -1
-          : view.toolCalls.findIndex((c) => c.status === "started" && c.toolExecutionId === toolExecutionId);
+      const matchIndex = findToolCallCardIndex(view, toolExecutionId);
 
       if (matchIndex === -1) {
         const card: ToolCallCard = {
