@@ -19,14 +19,11 @@ package bff
 //     mux never manufactures a 405 of its own for a read-shaped path.
 //
 // Control routes (input/gates/interrupt/create/restore) do not exist as code yet
-// — later tasks build the control host proxy and add them. The `if hostConfigured`
-// block below is the ONLY place future control-route registration may happen: it
-// is unreachable when hostConfigured is false, so browse-only mode cannot wire in
-// a control route by construction, not merely by omission. When those routes are
-// added, each state-changing one must be wrapped individually with csrf.Wrap
-// (csrf.go) before being handed to mux.Handle — see
-// TestNewMuxCSRFCompositionForFutureControlRoutes in mux_test.go, which proves
-// that composition is correct today even though no concrete route uses it yet.
+// — later tasks build the control host proxy and add them, via
+// BFFMux.RegisterControlRoute (below), the ONLY sanctioned way to add a
+// state-changing route to a *BFFMux. RegisterControlRoute always wraps the
+// handler it's given with CSRFGuard.Wrap, so a control route registered through
+// it can never ship unprotected.
 //
 // Middleware layering: HostOriginGuard wraps the WHOLE returned handler — every
 // request, read or (future) control, passes its Host/Origin check first, fail
@@ -38,34 +35,56 @@ package bff
 // requesting a control-shaped path must 404/405 (route not registered — the same
 // convention harness's own ReadHandler tests use, see mux_test.go), never 403
 // (route registered but request rejected). CSRFGuard therefore applies only
-// per-route, at the point a state-changing control route is actually registered.
+// per-route, via RegisterControlRoute, at the point a state-changing control
+// route is actually registered.
 import "net/http"
+
+// BFFMux is the BFF's assembled public HTTP surface, built by NewMux. It embeds
+// the guard-wrapped http.Handler directly, so a *BFFMux satisfies http.Handler
+// and can be used anywhere one is expected (http.Server.Handler, httptest, etc).
+// It also retains the underlying *http.ServeMux and *CSRFGuard as construction
+// state, exposed only through RegisterControlRoute — see that method's doc for
+// why direct access to either isn't exported.
+type BFFMux struct {
+	http.Handler
+
+	mux  *http.ServeMux
+	csrf *CSRFGuard
+}
 
 // NewMux assembles the BFF's public HTTP surface over read (the mounted or
 // proxied ReadSource, see readsource.go), guard (HostOriginGuard, see guard.go),
-// and csrf (CSRFGuard, see csrf.go), for future control-route use. hostConfigured
-// reports whether a control host is wired: it currently affects only the
-// capabilities document (capabilities.go), but ALSO establishes the sole
-// insertion point for control-route registration a later task will use — see the
-// package doc comment above.
-func NewMux(read ReadSource, guard *HostOriginGuard, csrf *CSRFGuard, hostConfigured bool) http.Handler {
-	_ = csrf // reserved for a later task's state-changing control routes; see package doc.
-
+// and csrf (CSRFGuard, see csrf.go). hostConfigured reports whether a control
+// host is wired: it currently affects only the capabilities document
+// (capabilities.go). csrf is retained on the returned *BFFMux for
+// RegisterControlRoute (below) — a later task's only sanctioned way to add a
+// control route to this mux.
+func NewMux(read ReadSource, guard *HostOriginGuard, csrf *CSRFGuard, hostConfigured bool) *BFFMux {
 	mux := http.NewServeMux()
 
 	mux.Handle("GET /api/v1/capabilities", handleCapabilities(hostConfigured))
 	mux.Handle("/api/", http.StripPrefix("/api", read))
 
-	if hostConfigured {
-		// A later task registers the control-plane's state-changing routes HERE —
-		// input/gates/interrupt/create/restore — each wrapped individually with
-		// csrf.Wrap, e.g.:
-		//
-		//     mux.Handle("POST /api/v1/sessions/{sid}/input", csrf.Wrap(controlHandler))
-		//
-		// This block is the only place a control route can be registered; it never
-		// runs when hostConfigured is false, so browse-only mode cannot wire one in.
+	return &BFFMux{
+		Handler: guard.Wrap(mux),
+		mux:     mux,
+		csrf:    csrf,
 	}
+}
 
-	return guard.Wrap(mux)
+// RegisterControlRoute adds a state-changing route to the mux, always wrapped by
+// the CSRF guard. This is the ONLY sanctioned way to add a control route — a
+// future task that registers a POST/PUT/PATCH/DELETE handler directly on the
+// underlying mux, bypassing this method, would ship an unprotected route. There
+// are no control routes yet (a later task adds the first); this method exists
+// now so CSRF protection is part of the mux's own construction contract, not
+// something a later task has to remember.
+//
+// pattern follows net/http.ServeMux's Go 1.22+ pattern syntax (e.g.
+// "POST /api/v1/sessions/{sid}/input"), same as the capabilities and read-plane
+// routes NewMux itself registers. Because RegisterControlRoute mutates the same
+// *http.ServeMux the returned *BFFMux already serves through, a newly registered
+// route is reachable immediately — there is no separate "build" step.
+func (m *BFFMux) RegisterControlRoute(pattern string, handler http.Handler) {
+	m.mux.Handle(pattern, m.csrf.Wrap(handler))
 }

@@ -174,36 +174,21 @@ func mustMint(t *testing.T, csrf *bff.CSRFGuard) string {
 	return token
 }
 
-// TestNewMuxCSRFCompositionForFutureControlRoutes covers requirement 4.
+// TestNewMuxRegisterControlRouteAppliesCSRF covers requirement 4, through the
+// real exported API rather than a hand-composed handler chain outside it.
 //
 // Control routes (input/gates/interrupt/create/restore) don't exist as code yet
-// — a later task builds the control host proxy and registers them. Because of
-// that, this task's NewMux has NOTHING for a real POST request to reach: the
-// entire /api surface today is either the synthesized capabilities GET route or
-// the mounted (GET-only, from the caller's point of view) read plane.
-//
-// This deliberately means CSRFGuard is NOT wired into NewMux's own returned
-// handler as blanket middleware over the whole mux (see mux.go's package
-// comment for the full reasoning): CSRFGuard.Wrap intercepts every
-// POST/PUT/PATCH/DELETE unconditionally, before net/http's ServeMux gets a
-// chance to resolve routing. Wrapping the whole mux with it would turn
-// TestNewMuxBrowseOnlyCapabilitiesReadPlaneAndControlAbsence's control-shaped
-// POST into a blanket 403 (a route exists and rejected it), defeating that
-// test's 404/405 absence proof (no route is registered at all). Fabricating a
-// fake POST route on NewMux's own mux just to exercise CSRF would be equally
-// wrong: it would ship dead, untested-in-anger control-plane-shaped surface
-// area a client could accidentally start depending on before it is real.
-//
-// What this test proves instead: the EXACT composition mux.go's package comment
-// documents for a later task to use when it registers a real control route —
-// guard.Wrap(csrf.Wrap(controlHandler)) — is correct, using the same
-// *HostOriginGuard and *CSRFGuard instances a caller hands to NewMux. This is
-// the "direct unit-level composition check" the task's own test plan
-// anticipates for exactly this situation.
-func TestNewMuxCSRFCompositionForFutureControlRoutes(t *testing.T) {
+// — a later task builds the control host proxy and registers them. What this
+// test proves in the meantime: BFFMux.RegisterControlRoute — the ONLY sanctioned
+// way to add a state-changing route (see mux.go's doc comment) — always applies
+// the same *CSRFGuard NewMux was constructed with, and HostOriginGuard still
+// runs first (guard.Wrap wraps the whole *BFFMux). This exercises the production
+// code path directly: NewMux -> RegisterControlRoute -> mux.ServeHTTP, not a
+// composition assembled by the test itself.
+func TestNewMuxRegisterControlRouteAppliesCSRF(t *testing.T) {
 	t.Parallel()
 
-	guard := bff.NewHostOriginGuard()
+	read, _ := newMountedSource(t)
 	csrf := bff.NewCSRFGuard(time.Hour)
 	validToken := mustMint(t, csrf)
 
@@ -223,13 +208,16 @@ func TestNewMuxCSRFCompositionForFutureControlRoutes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			// Fresh *BFFMux per case: RegisterControlRoute mutates shared mux state,
+			// and subtests run in parallel with each other.
+			mux := bff.NewMux(read, bff.NewHostOriginGuard(), csrf, true)
+
 			called := false
 			controlHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
 				w.WriteHeader(http.StatusOK)
 			})
-			// Exactly the composition mux.go documents for a future control route.
-			protected := guard.Wrap(csrf.Wrap(controlHandler))
+			mux.RegisterControlRoute("POST /api/v1/sessions/{sid}/input", controlHandler)
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/abc/input", nil)
 			req.Host = tt.host
@@ -237,7 +225,7 @@ func TestNewMuxCSRFCompositionForFutureControlRoutes(t *testing.T) {
 				req.Header.Set(bff.CSRFHeaderName, tt.token)
 			}
 			rec := httptest.NewRecorder()
-			protected.ServeHTTP(rec, req)
+			mux.ServeHTTP(rec, req)
 
 			if rec.Code != tt.want {
 				t.Errorf("status = %d, want %d", rec.Code, tt.want)
