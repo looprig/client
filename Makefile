@@ -1,4 +1,16 @@
-GO_DIRS := $(shell go list -f '{{.Dir}}' ./...)
+# This module lives outside the parent looprig/go.work workspace. Without GOWORK=off,
+# `go` auto-detects go.work by walking up from this directory and resolves modules
+# (e.g. github.com/looprig/harness) via the workspace's own checkout instead of this
+# module's go.mod replace directive -- silently wrong, not an error. `export` here
+# correctly propagates GOWORK=off into recipe shells (e.g. `test`, `vet`), but GNU
+# Make does NOT apply it to `$(shell ...)` calls used in immediate (`:=`) variable
+# assignments evaluated at parse time -- those need GOWORK=off prefixed directly.
+export GOWORK := off
+
+HARNESS_VERSION := v0.23.0
+HARNESS_DIR := $(shell GOWORK=off go list -m -f '{{.Dir}}' github.com/looprig/harness)
+
+GO_DIRS := $(shell GOWORK=off go list -f '{{.Dir}}' ./...)
 
 .PHONY: test fmt fmt-check lint vet staticcheck gosec vuln secure contract sdk app build
 
@@ -33,3 +45,10 @@ secure: lint vuln
 
 build:
 	CGO_ENABLED=0 go build -trimpath ./cmd/...
+
+contract:
+	rm -rf contract/schema contract/fixtures
+	mkdir -p contract/schema contract/fixtures
+	cp $(HARNESS_DIR)/pkg/serve/testdata/schema/*.json contract/schema/
+	cp $(HARNESS_DIR)/pkg/serve/testdata/fixtures/* contract/fixtures/
+	@echo "$(HARNESS_VERSION)" > contract/VERSION
