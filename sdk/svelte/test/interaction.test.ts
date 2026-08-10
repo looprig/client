@@ -332,6 +332,41 @@ describe("GateStore", () => {
     store.stop();
   });
 
+  it("closes the re-answer race window: waitingGateId no longer reflects the answered gate the instant respondGate resolves, even before the confirmatory poll completes", async () => {
+    const transport = new FakeTransport();
+    transport.readStatusResult = Promise.resolve(waitingStatus);
+    const store = new GateStore(transport, sessionId, 1000);
+    store.start();
+    await vi.waitFor(() => expect(store.waitingGateId).toBe(waitingStatus.waiting_gate_id));
+
+    const gateResponse = deferred<GateAcceptedResponse>();
+    transport.respondGateResult = gateResponse.promise;
+    // Hold the confirmatory poll open so we can observe the state strictly
+    // between respondGate resolving and that poll resolving — exactly the
+    // window a fast double-click could previously land in.
+    const confirmatoryPoll = deferred<SessionStatus>();
+    transport.readStatusResult = confirmatoryPoll.promise;
+
+    const respondCall = store.respond(GATE_APPROVAL_ACTIONS.approve);
+    gateResponse.resolve({});
+
+    // Wait until respond()'s confirmatory poll has actually been issued
+    // (the second readStatus call) — proof respondGate already resolved and
+    // `responding` has flipped back to false — without yet resolving that
+    // poll.
+    await vi.waitFor(() => expect(transport.readStatusCalls).toHaveLength(2));
+
+    expect(store.responding).toBe(false);
+    // The old behavior left `waitingGateId` pointing at the just-answered
+    // gate here, re-enabling the disabled-state check on the still-open
+    // `waitingGateId !== null` gate prompt/buttons. The fix must close that.
+    expect(store.waitingGateId).toBeNull();
+
+    confirmatoryPoll.resolve(idleStatus);
+    await respondCall;
+    store.stop();
+  });
+
   it("sets respondError and flips responding false on a failed respond(), and returns false", async () => {
     const transport = new FakeTransport();
     transport.readStatusResult = Promise.resolve(waitingStatus);

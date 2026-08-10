@@ -136,6 +136,24 @@ export class GateStore {
   private readonly guard = new RefreshGuard();
   private stopped = true;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Set the instant `respond()`'s `transport.respondGate()` call resolves
+   * successfully, to close the window between that resolution and the
+   * confirmatory `pollOnce()` (below, still in flight at that point)
+   * actually updating `status`. Without this, `waitingGateId` — and every
+   * disabled-state check keyed on it, e.g. the gate-response buttons in
+   * `app/src/routes/sessions/[sid]/+page.svelte` — would still reflect the
+   * just-answered gate for a network-RTT-sized window after `responding`
+   * flips back to `false`, letting a fast double-click fire a second
+   * `respondGate` call for a gate the server already resolved (rejected
+   * harmlessly server-side as `GateNotReady`, but a wasted round trip and a
+   * confusing transient error). Never reset back to `null` afterward: gate
+   * ids are opaque and assigned once per gate open (never reused), so once a
+   * later poll's `status` reports a *different* `waiting_gate_id` (or none),
+   * `waitingGateId`'s comparison below stops matching on its own — no
+   * explicit clear is needed.
+   */
+  private answeredGateId: string | null = null;
 
   constructor(
     private readonly transport: LooprigTransport,
@@ -143,9 +161,18 @@ export class GateStore {
     private readonly intervalMs: number = DEFAULT_GATE_POLL_INTERVAL_MS,
   ) {}
 
-  /** The opaque gate id a UI should render a prompt for, or `null` if no gate is currently open. Derived from `status` on every read — never parsed or reconstructed, passed through exactly as the server sent it. */
+  /**
+   * The opaque gate id a UI should render a prompt for, or `null` if no gate
+   * is currently open. Derived from `status` on every read — never parsed or
+   * reconstructed, passed through exactly as the server sent it — EXCEPT
+   * that a gate `respond()` has already been told resolved successfully is
+   * masked to `null` immediately, ahead of the confirmatory poll that will
+   * eventually update `status` to match (see `answeredGateId`'s own comment).
+   */
   get waitingGateId(): string | null {
-    return this.status?.waiting_gate_id ?? null;
+    const id = this.status?.waiting_gate_id ?? null;
+    if (id !== null && id === this.answeredGateId) return null;
+    return id;
   }
 
   /** Starts the poll loop. Idempotent: a no-op while already `polling`. */
@@ -171,9 +198,14 @@ export class GateStore {
    * `GateResponseRequest.action` — pass one of `GATE_APPROVAL_ACTIONS`'
    * three exact values). A no-op (returns `false` without calling the
    * transport) if no gate is currently open or a response is already in
-   * flight. On success, immediately re-polls status once (outside the
-   * regular interval) so `waitingGateId` clears promptly rather than after
-   * up to `intervalMs` of staleness.
+   * flight. On success, `waitingGateId` is masked to `null` the instant
+   * `respondGate` resolves (see `answeredGateId`'s own comment) — before
+   * `responding` flips back to `false` — so there is no window where a UI
+   * gating on either field would treat this gate as both answerable and
+   * already answered. A confirmatory re-poll of status still runs
+   * immediately afterward (outside the regular interval) to reconcile
+   * `status` itself with the server's view, rather than leaving it stale
+   * until up to `intervalMs` later.
    */
   async respond(action: GateApprovalAction, options?: RequestOptions): Promise<boolean> {
     const gateId = this.waitingGateId;
@@ -183,6 +215,7 @@ export class GateStore {
     this.respondError = null;
     try {
       await this.transport.respondGate(this.sessionId, gateId, { action }, options);
+      this.answeredGateId = gateId;
       this.responding = false;
       await this.pollOnce();
       return true;
