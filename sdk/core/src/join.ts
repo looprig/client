@@ -100,21 +100,42 @@
  *
  * ## Reconnect
  *
- * `options.autoReconnect` (default `false`) controls what happens when the
- * live source's async iterable completes (its `next()` resolves
- * `{ done: true }`) — e.g. the underlying SSE connection was dropped:
+ * `options.autoReconnect` (default `false`) controls what happens when this
+ * connection attempt's live segment ENDS, for EITHER of two reasons:
  *
- *  - `false` (default): the join ends cleanly (the generator returns). This
- *    is also what a session's live stream completing for good looks like —
- *    see join.test.ts's "session ends" case: no hang, no unhandled
- *    rejection, just a clean end of the output stream.
- *  - `true`: the join opens a fresh connection (`liveSource()` again) and
+ *  1. Cleanly: the live source's async iterable completes (its `next()`
+ *     resolves `{ done: true }`) — e.g. the server closed the connection.
+ *  2. With an error: `readHistory()` rejects during the cold catch-up, OR
+ *     the live connection's iterator throws (propagating through
+ *     `queue.next()` rejecting) — e.g. a network failure. This is, in
+ *     practice, the more common real-world disconnect mode, and is covered
+ *     the SAME way as a clean end, not a separate code path.
+ *
+ * What `autoReconnect` does with either case:
+ *
+ *  - `false` (default): the join ends. A clean end returns the generator
+ *    normally (see join.test.ts's "session ends" case: no hang, no
+ *    unhandled rejection, just a clean end of the output stream); an error
+ *    propagates as a rejection out of the `.next()` call in flight when it
+ *    happened (see join.test.ts's "readHistory() rejecting" / "the live
+ *    connection failing" cases) — a caller that wants to handle
+ *    reconnection/backoff itself still can, exactly as before this covered
+ *    errors too.
+ *  - `true`: EITHER case opens a fresh connection (`liveSource()` again) and
  *    repeats the full subscribe-buffer-catch-up cycle from step 1, resuming
  *    the cold walk from the highest `journal_seq` this join has applied so
  *    far (not from 0) — so a reconnect only re-reads the gap the dropped
  *    connection may have missed, and the exact no-gap/no-duplicate property
  *    holds across the reconnect boundary exactly as it does for the first
- *    connection. See join.test.ts's "reconnect mid-stream" case.
+ *    connection. See join.test.ts's "reconnect mid-stream" case (clean end)
+ *    and its "reconnect on error" cases (readHistory()/live-connection
+ *    failure). An ERROR-triggered reconnect waits `options.reconnectDelayMs`
+ *    (default 250ms) before retrying — see that option's doc comment: this
+ *    is a minimal fixed delay to avoid hot-looping against a persistently
+ *    down server, NOT a real backoff/jitter policy (the delay does not grow
+ *    across repeated failures); a full backoff policy is a known, deliberately
+ *    out-of-scope follow-up. A clean end reconnects immediately, with no
+ *    delay, exactly as before.
  */
 import type { SessionView, FoldInput, FoldResult, FoldError } from "./fold.js";
 import { emptySessionView, fold } from "./fold.js";
@@ -154,12 +175,24 @@ export interface JoinOptions {
   /** Page size forwarded to `readHistory`. Default: transport's own default. */
   pageLimit?: number;
   /**
-   * Reopen a fresh live connection and repeat the join cycle when one ends,
-   * instead of terminating the output stream. Default `false`. See the
-   * module comment's "Reconnect" section.
+   * Reopen a fresh live connection and repeat the join cycle when one ends —
+   * cleanly OR with an error (`readHistory()` rejecting, or the live
+   * connection's iterator throwing) — instead of terminating the output
+   * stream. Default `false`. See the module comment's "Reconnect" section.
    */
   autoReconnect?: boolean;
-  /** Aborts the join. Checked between steps; does not preempt an in-flight `readHistory`/live `next()` call already awaited (those should honor their own cancellation, e.g. via `RequestOptions.signal` on the transport call a caller wires up). */
+  /**
+   * Delay before a reconnect attempt triggered by an ERROR (not applied to a
+   * clean end-of-stream reconnect, which retries immediately as before).
+   * Only consulted when `autoReconnect` is `true`. Default `250`
+   * (milliseconds). This is a minimal fixed delay so a persistently-down
+   * server doesn't get hammered by a tight zero-delay retry loop — it is
+   * NOT a backoff/jitter policy (the delay does not grow across repeated
+   * failures); that's a known, deliberately out-of-scope follow-up. Set to
+   * `0` to retry immediately (e.g. in a test that doesn't want to wait).
+   */
+  reconnectDelayMs?: number;
+  /** Aborts the join. Checked between steps; does not preempt an in-flight `readHistory`/live `next()` call already awaited (those should honor their own cancellation, e.g. via `RequestOptions.signal` on the transport call a caller wires up). Also cuts short an in-progress error-triggered reconnect delay. */
   signal?: AbortSignal;
 }
 
@@ -190,6 +223,7 @@ export async function* joinSessionView(
   let cursor = options.fromJournalSeq ?? 0;
   const signal = options.signal;
   const autoReconnect = options.autoReconnect ?? false;
+  const reconnectDelayMs = options.reconnectDelayMs ?? 250;
 
   for (;;) {
     if (signal?.aborted) return;
@@ -198,6 +232,14 @@ export async function* joinSessionView(
     const queue = new AsyncQueue<SseFrame>();
     const liveIterator = liveSource()[Symbol.asyncIterator]();
     const pumpDone = pumpLiveConnection(liveIterator, queue);
+
+    // Set inside `catch` below when `autoReconnect` swallows an error rather
+    // than rethrowing it, so the code after `finally` knows to (a) actually
+    // loop back around instead of returning and (b) apply the reconnect
+    // delay — see the module comment's "Reconnect" section for why an error
+    // is treated as just another reason this connection attempt ended,
+    // exactly like a clean `{ done: true }`, once `autoReconnect` is on.
+    let reconnectAfterError = false;
 
     try {
       // --- Step 2: page the cold journal forward to the tip T. ---
@@ -254,6 +296,14 @@ export async function* joinSessionView(
         if (frame.type === "enduring") cursor = Math.max(cursor, frame.journalSeq + 1);
         yield toJoinEvent(result, input, view);
       }
+    } catch (err) {
+      // `readHistory()` rejected (step 2), or the live connection's iterator
+      // threw (propagated through `queue.next()` rejecting in step 4) —
+      // see the module comment's "Reconnect" section. Only swallow this
+      // when `autoReconnect` is on; otherwise preserve the pre-existing
+      // behavior of propagating it straight out of this generator.
+      if (!autoReconnect) throw err;
+      reconnectAfterError = true;
     } finally {
       // Signal the live source to release its resources, and let the pump
       // wind down on its own — but do NOT block this generator's own
@@ -278,6 +328,15 @@ export async function* joinSessionView(
     }
 
     if (!autoReconnect) return;
+
+    if (reconnectAfterError) {
+      // Minimal hot-loop guard for a persistently-failing server — see
+      // `reconnectDelayMs`'s doc comment for why this is a fixed delay, not
+      // a real backoff policy. A clean end (reconnectAfterError === false)
+      // intentionally retries immediately, unchanged from before.
+      await delay(reconnectDelayMs, signal);
+      if (signal?.aborted) return;
+    }
     // Loop again: liveSource() is called afresh at the top, and the cold walk
     // resumes from `cursor` (the highest journal_seq this join has applied so
     // far), so the reconnect cycle only re-reads whatever gap the dropped
@@ -286,6 +345,30 @@ export async function* joinSessionView(
 }
 
 // --- Internals ------------------------------------------------------------------
+
+/**
+ * Resolves after `ms` milliseconds, or immediately if `ms <= 0` (skips the
+ * timer entirely — used by tests that pass `reconnectDelayMs: 0` to exercise
+ * the error-triggered reconnect path without actually waiting). If `signal`
+ * aborts while waiting, resolves immediately rather than waiting out the
+ * full delay — the top-of-loop `if (signal?.aborted) return;` check right
+ * after the caller's `await` is what actually ends the join in that case;
+ * this function's job is only to not make that check wait needlessly.
+ */
+function delay(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
 
 function isAlreadyCovered(frame: SseFrame, tip: number): boolean {
   return frame.type === "enduring" && frame.journalSeq < tip;
