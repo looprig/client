@@ -18,33 +18,63 @@ package bff
 //     mux and the ReadSource decides 200/404/405 on its own terms — the outer BFF
 //     mux never manufactures a 405 of its own for a read-shaped path.
 //
-// Control routes (input/gates/interrupt/create/restore) do not exist as code yet
-// — later tasks build the control host proxy and add them, via
-// BFFMux.RegisterControlRoute (below), the ONLY sanctioned way to add a
-// state-changing route to a *BFFMux. RegisterControlRoute always wraps the
-// handler it's given with CSRFGuard.Wrap, so a control route registered through
-// it can never ship unprotected.
+// Two constructors, two shapes of *BFFMux — NOT one constructor plus an
+// independently-threaded boolean:
+//
+//   - NewBrowseOnlyMux(read, guard) has no parameter through which a
+//     *ControlProxy, a *CSRFGuard, or an events handler could ever be supplied.
+//     It is therefore structurally impossible — provable by reading this
+//     function's signature alone, no runtime check required — for a mux built
+//     this way to end up serving a single control-shaped route. The five
+//     control routes (create/restore/input/gate/interrupt) and the events route
+//     are simply never registered on its underlying *http.ServeMux, so a
+//     request to any of them 404s (net/http's ServeMux answering "no such
+//     route"), never 403 (a route existing but rejecting the request).
+//   - NewMuxWithHost(read, guard, csrf, controlProxy, eventsProxy) requires all
+//     five of those routes' dependencies up front and wires every one of them —
+//     via the unexported registerControlRoute/registerEventsRoute below —
+//     atomically, inside the constructor, before it returns. There is no
+//     exported method that adds a control or events route to a *BFFMux after
+//     construction, for either constructor: registerControlRoute and
+//     registerEventsRoute are unexported, so the ONLY code that can ever call
+//     them is code inside this package (in practice, only NewMuxWithHost, via
+//     ControlProxy.registerRoutes for the five control routes and directly for
+//     the events route).
+//
+// This closes what would otherwise be a real gap: with a single constructor
+// taking an independent hostConfigured bool, nothing stops a caller from
+// passing hostConfigured: true and never registering any control routes (the
+// capabilities document would then claim gate_response/live_sse over a mux that
+// serves none of them), or hostConfigured: false while still registering
+// control routes anyway (the document would then hide capabilities the mux
+// actually serves). Splitting into two constructors, each of which decides its
+// own hostConfigured bool internally and is the only place its own routes get
+// registered, makes "what capabilities.go advertises" and "what is actually on
+// the mux" the same fact by construction — there is no seam through which they
+// could drift apart.
 //
 // Middleware layering: HostOriginGuard wraps the WHOLE returned handler — every
-// request, read or (future) control, passes its Host/Origin check first, fail
-// secure, reject-fast (guard.go). CSRFGuard is NOT wrapped around the whole mux:
-// doing so would make CSRFGuard.Wrap intercept every POST/PUT/PATCH/DELETE BEFORE
+// request, read or control, passes its Host/Origin check first, fail secure,
+// reject-fast (guard.go). CSRFGuard is NOT wrapped around the whole mux: doing
+// so would make CSRFGuard.Wrap intercept every POST/PUT/PATCH/DELETE BEFORE
 // net/http's ServeMux ever gets a chance to resolve routing, turning every such
 // request into a blanket 403 — including one aimed at a path with no control
 // route registered at all. That would defeat browse-only mode's absence proof:
 // requesting a control-shaped path must 404/405 (route not registered — the same
 // convention harness's own ReadHandler tests use, see mux_test.go), never 403
 // (route registered but request rejected). CSRFGuard therefore applies only
-// per-route, via RegisterControlRoute, at the point a state-changing control
+// per-route, via registerControlRoute, at the point a state-changing control
 // route is actually registered.
 import "net/http"
 
-// BFFMux is the BFF's assembled public HTTP surface, built by NewMux. It embeds
-// the guard-wrapped http.Handler directly, so a *BFFMux satisfies http.Handler
-// and can be used anywhere one is expected (http.Server.Handler, httptest, etc).
-// It also retains the underlying *http.ServeMux and *CSRFGuard as construction
-// state, exposed only through RegisterControlRoute — see that method's doc for
-// why direct access to either isn't exported.
+// BFFMux is the BFF's assembled public HTTP surface, built by NewBrowseOnlyMux
+// or NewMuxWithHost. It embeds the guard-wrapped http.Handler directly, so a
+// *BFFMux satisfies http.Handler and can be used anywhere one is expected
+// (http.Server.Handler, httptest, etc). It also retains the underlying
+// *http.ServeMux and *CSRFGuard as construction state, used only by
+// registerControlRoute/registerEventsRoute below — see those methods' doc for
+// why neither is exported: a *BFFMux's route set is fixed the instant its
+// constructor returns.
 type BFFMux struct {
 	http.Handler
 
@@ -52,64 +82,115 @@ type BFFMux struct {
 	csrf *CSRFGuard
 }
 
-// NewMux assembles the BFF's public HTTP surface over read (the mounted or
-// proxied ReadSource, see readsource.go), guard (HostOriginGuard, see guard.go),
-// and csrf (CSRFGuard, see csrf.go). hostConfigured reports whether a control
-// host is wired: it currently affects only the capabilities document
-// (capabilities.go). csrf is retained on the returned *BFFMux for
-// RegisterControlRoute (below) — a later task's only sanctioned way to add a
-// control route to this mux.
-func NewMux(read ReadSource, guard *HostOriginGuard, csrf *CSRFGuard, hostConfigured bool) *BFFMux {
+// NewBrowseOnlyMux assembles a browse-only BFFMux over read (the mounted or
+// proxied ReadSource, see readsource.go) and guard (HostOriginGuard, see
+// guard.go): the read plane, GET /api/v1/capabilities advertising "journal"
+// alone, and NO control routes of any kind — not registered-then-rejected,
+// genuinely absent. See the package doc above for why this is a distinct
+// constructor rather than NewMuxWithHost called with nil-able control
+// parameters.
+func NewBrowseOnlyMux(read ReadSource, guard *HostOriginGuard) *BFFMux {
 	mux := http.NewServeMux()
 
-	mux.Handle("GET /api/v1/capabilities", handleCapabilities(hostConfigured))
+	mux.Handle("GET /api/v1/capabilities", handleCapabilities(false))
 	mux.Handle("/api/", http.StripPrefix("/api", read))
 
 	return &BFFMux{
 		Handler: guard.Wrap(mux),
 		mux:     mux,
-		csrf:    csrf,
+		// csrf is deliberately left nil: nothing ever calls
+		// registerControlRoute (the only method that reads it) on a *BFFMux
+		// built by this constructor, because this constructor never calls it
+		// either.
 	}
 }
 
-// RegisterControlRoute adds a state-changing route to the mux, always wrapped by
-// the CSRF guard. This is the ONLY sanctioned way to add a control route — a
-// future task that registers a POST/PUT/PATCH/DELETE handler directly on the
-// underlying mux, bypassing this method, would ship an unprotected route. There
-// are no control routes yet (a later task adds the first); this method exists
-// now so CSRF protection is part of the mux's own construction contract, not
-// something a later task has to remember.
+// NewMuxWithHost assembles a control-host-configured BFFMux over read (the
+// mounted or proxied ReadSource, see readsource.go), guard (HostOriginGuard,
+// see guard.go), csrf (CSRFGuard, see csrf.go), controlProxy (the five
+// allowlisted control routes, see control.go), and eventsProxy (the live SSE
+// route, typically built by NewSSEProxy — see events.go). It registers
+// everything NewBrowseOnlyMux registers, PLUS all five control routes (via
+// controlProxy.registerRoutes, always CSRF-protected) and the events route
+// (registerEventsRoute, never CSRF-protected — see that method's doc), and
+// advertises the full capabilities feature set. All of this happens inside
+// this constructor, atomically, before it returns — see the package doc above
+// for why folding registration into construction (rather than a separate
+// RegisterControlRoute/RegisterEventsRoute call a caller must remember to make)
+// is what keeps capability advertisement from ever drifting out of sync with
+// which routes actually exist.
 //
-// pattern follows net/http.ServeMux's Go 1.22+ pattern syntax (e.g.
-// "POST /api/v1/sessions/{sid}/input"), same as the capabilities and read-plane
-// routes NewMux itself registers. Because RegisterControlRoute mutates the same
-// *http.ServeMux the returned *BFFMux already serves through, a newly registered
-// route is reachable immediately — there is no separate "build" step.
-func (m *BFFMux) RegisterControlRoute(pattern string, handler http.Handler) {
+// eventsProxy is wrapped in http.StripPrefix("/api", eventsProxy) before being
+// registered, mirroring exactly how controlProxy.registerRoutes strips "/api"
+// for its own five routes and how this function strips it for the read plane
+// below: eventsProxy (typically built by NewSSEProxy) matches its own internal
+// allowlist against harness's unprefixed route shape ("/v1/sessions/{sid}/events"),
+// not the "/api"-prefixed shape this mux's own outer pattern matches on.
+//
+// csrf, controlProxy, and eventsProxy must all be non-nil: a caller with no
+// control host to wire should call NewBrowseOnlyMux instead. Passing a nil
+// dependency here is a broken composition and panics immediately, at
+// construction, rather than shipping a mux that advertises the full feature
+// set with some of its routes silently missing.
+func NewMuxWithHost(read ReadSource, guard *HostOriginGuard, csrf *CSRFGuard, controlProxy *ControlProxy, eventsProxy http.Handler) *BFFMux {
+	if csrf == nil {
+		panic("bff: NewMuxWithHost: csrf must not be nil")
+	}
+	if controlProxy == nil {
+		panic("bff: NewMuxWithHost: controlProxy must not be nil")
+	}
+	if eventsProxy == nil {
+		panic("bff: NewMuxWithHost: eventsProxy must not be nil")
+	}
+
+	mux := http.NewServeMux()
+
+	mux.Handle("GET /api/v1/capabilities", handleCapabilities(true))
+	mux.Handle("/api/", http.StripPrefix("/api", read))
+
+	m := &BFFMux{mux: mux, csrf: csrf}
+	controlProxy.registerRoutes(m)
+	m.registerEventsRoute(routeEvents, http.StripPrefix("/api", eventsProxy))
+	m.Handler = guard.Wrap(mux)
+
+	return m
+}
+
+// routeEvents is the one events route pattern NewMuxWithHost registers
+// eventsProxy under, following net/http.ServeMux's Go 1.22+ pattern syntax,
+// same as the capabilities and read-plane routes registered above and the
+// control route patterns control.go's ControlProxy.registerRoutes uses.
+const routeEvents = "GET /api/v1/sessions/{sid}/events"
+
+// registerControlRoute adds a state-changing route to the mux, always wrapped
+// by the CSRF guard. Unexported deliberately: the only code that can ever call
+// it is code inside this package, and in practice that is exactly one call
+// site — ControlProxy.registerRoutes (control.go), itself called only from
+// NewMuxWithHost above. There is no way, from outside this package, to add a
+// route to a *BFFMux after either constructor has returned it — see the
+// package doc for why that is the property this task closes a gap to
+// guarantee.
+func (m *BFFMux) registerControlRoute(pattern string, handler http.Handler) {
 	m.mux.Handle(pattern, m.csrf.Wrap(handler))
 }
 
-// RegisterEventsRoute adds a read-shaped route (opening a live SSE stream, e.g.
-// via NewSSEProxy — see events.go) directly to the mux, WITHOUT wrapping it in the
-// CSRF guard. This is deliberate, not an oversight: CSRFGuard.Wrap only ever
-// demands a token for POST/PUT/PATCH/DELETE (see csrf.go's doc) and passes every
-// other method — including the GET an EventSource issues to open a stream —
-// through untouched regardless of which wrapper it goes through. Opening an SSE
-// stream is a read (no state changes on the server), the same category as the
-// read-plane routes NewMux registers directly on mux with no CSRF wrapping at
-// all; routing it through RegisterControlRoute instead would be misleading (it
-// would silently no-op the CSRF check on a route that was never state-changing)
-// and would misclassify it in RegisterControlRoute's "state-changing route" doc
-// contract. HostOriginGuard (guard.Wrap, wrapping the whole *BFFMux) still
-// protects this route exactly as it protects every other one.
+// registerEventsRoute adds a read-shaped route (opening a live SSE stream, e.g.
+// via NewSSEProxy — see events.go) directly to the mux, WITHOUT wrapping it in
+// the CSRF guard. This is deliberate, not an oversight: CSRFGuard.Wrap only
+// ever demands a token for POST/PUT/PATCH/DELETE (see csrf.go's doc) and passes
+// every other method — including the GET an EventSource issues to open a
+// stream — through untouched regardless of which wrapper it goes through.
+// Opening an SSE stream is a read (no state changes on the server), the same
+// category as the read-plane routes registered directly on mux with no CSRF
+// wrapping at all; routing it through registerControlRoute instead would be
+// misleading (it would silently no-op the CSRF check on a route that was never
+// state-changing) and would misclassify it in registerControlRoute's
+// "state-changing route" doc contract. HostOriginGuard (guard.Wrap, wrapping
+// the whole *BFFMux) still protects this route exactly as it protects every
+// other one.
 //
-// pattern follows the same net/http.ServeMux Go 1.22+ syntax as
-// RegisterControlRoute and NewMux's own routes (e.g.
-// "GET /api/v1/sessions/{sid}/events"). No composition root wires a route through
-// this method yet — the control/session host that would supply NewSSEProxy's
-// upstream URL doesn't exist as a construction-time parameter of NewMux — so this
-// is the sanctioned seam a later task uses, not something exercised by NewMux
-// itself today.
-func (m *BFFMux) RegisterEventsRoute(pattern string, handler http.Handler) {
+// Unexported for the same reason registerControlRoute is: the only call site is
+// NewMuxWithHost above, at construction time.
+func (m *BFFMux) registerEventsRoute(pattern string, handler http.Handler) {
 	m.mux.Handle(pattern, handler)
 }

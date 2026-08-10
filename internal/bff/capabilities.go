@@ -5,11 +5,15 @@ package bff
 // route (harness's serve.ReadHandler always advertises "journal" only, because a
 // read plane alone never knows whether a control host sits behind the same BFF).
 // The BFF is the only party that knows the full picture end-to-end, so it
-// synthesizes its own document from hostConfigured (see mux.go's NewMux):
+// synthesizes its own document from hostConfigured (see mux.go's
+// NewBrowseOnlyMux and NewMuxWithHost, which each pass a hardcoded, constructor
+// -specific value here — never an independently threaded bool a caller could
+// mismatch against which routes it actually registered):
 //
-//   - hostConfigured == true  (a control host is wired): the BFF can serve the
-//     live plane end-to-end, so it advertises the full feature set.
-//   - hostConfigured == false (browse-only mode, no control host): the BFF
+//   - hostConfigured == true  (NewMuxWithHost: a control host is wired): the
+//     BFF can serve the live plane end-to-end, so it advertises the full
+//     feature set.
+//   - hostConfigured == false (NewBrowseOnlyMux: no control host): the BFF
 //     advertises "journal" ONLY. It must never claim live_sse/ephemeral_sse/
 //     gate_response with no live plane behind it — a client that trusts this
 //     document and opens an SSE connection expecting one of those planes would
@@ -65,7 +69,8 @@ var readOnlyFeatures = []string{featureJournal}
 
 // handleCapabilities builds the GET /api/v1/capabilities handler. It reads no
 // per-request state and touches no dependency beyond hostConfigured, which is
-// fixed at mux-construction time (see NewMux) — every request gets the identical
+// fixed at mux-construction time (see NewBrowseOnlyMux and NewMuxWithHost in
+// mux.go) — every request gets the identical
 // 200 JSON body naming the protocol, its version, and the feature planes the BFF
 // actually backs end-to-end, in their canonical order.
 func handleCapabilities(hostConfigured bool) http.HandlerFunc {

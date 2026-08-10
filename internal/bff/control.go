@@ -169,22 +169,28 @@ func (p *ControlProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.mux.ServeHTTP(w, r)
 }
 
-// RegisterRoutes wires all five control routes onto mux via
-// BFFMux.RegisterControlRoute — the ONLY sanctioned way to add a state-changing
-// route (mux.go) — so every route p serves is CSRF-protected. It strips the
-// "/api" prefix before dispatch (the same convention NewMux itself uses for the
-// read plane's "/api/" catch-all: http.StripPrefix("/api", read)), so p's own
-// allowlist mux (built in NewControlProxy) matches on harness's own unprefixed
-// route shapes ("/v1/sessions", ...) exactly like proxiedReadSource's does,
-// keeping p directly testable with the same request shapes proxied_test.go and
+// registerRoutes wires all five control routes onto mux via
+// BFFMux.registerControlRoute — so every route p serves is CSRF-protected. It
+// strips the "/api" prefix before dispatch (the same convention
+// NewMuxWithHost/NewBrowseOnlyMux themselves use for the read plane's "/api/"
+// catch-all: http.StripPrefix("/api", read)), so p's own allowlist mux (built
+// in NewControlProxy) matches on harness's own unprefixed route shapes
+// ("/v1/sessions", ...) exactly like proxiedReadSource's does, keeping p
+// directly testable with the same request shapes proxied_test.go and
 // events_test.go already use.
-func (p *ControlProxy) RegisterRoutes(mux *BFFMux) {
+//
+// Unexported deliberately: its only caller is NewMuxWithHost (mux.go), at
+// construction time. Making this exported would reopen exactly the gap
+// NewMuxWithHost/NewBrowseOnlyMux's split is meant to close — any external
+// package could call controlProxy.RegisterRoutes(browseOnlyMux) and mutate a
+// mux that was deliberately built with no control host wired.
+func (p *ControlProxy) registerRoutes(mux *BFFMux) {
 	stripped := http.StripPrefix("/api", p)
-	mux.RegisterControlRoute("POST /api/v1/sessions", stripped)
-	mux.RegisterControlRoute("POST /api/v1/sessions/{sid}/restore", stripped)
-	mux.RegisterControlRoute("POST /api/v1/sessions/{sid}/input", stripped)
-	mux.RegisterControlRoute("POST /api/v1/sessions/{sid}/gates/{gid}", stripped)
-	mux.RegisterControlRoute("POST /api/v1/sessions/{sid}/interrupt", stripped)
+	mux.registerControlRoute("POST /api/v1/sessions", stripped)
+	mux.registerControlRoute("POST /api/v1/sessions/{sid}/restore", stripped)
+	mux.registerControlRoute("POST /api/v1/sessions/{sid}/input", stripped)
+	mux.registerControlRoute("POST /api/v1/sessions/{sid}/gates/{gid}", stripped)
+	mux.registerControlRoute("POST /api/v1/sessions/{sid}/interrupt", stripped)
 }
 
 // NewControlProxy builds an http.Handler (*ControlProxy) that reverse-proxies

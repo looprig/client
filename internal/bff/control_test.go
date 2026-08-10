@@ -399,9 +399,13 @@ func TestControlProxyUpstreamNon200(t *testing.T) {
 // TestControlProxyRegisterRoutesAppliesCSRFThroughRealBFFMux covers requirement 6
 // (self-review item: CSRF must genuinely apply through the real BFFMux, not just
 // in isolation like Task 12's own test). It exercises the production wiring path
-// directly: NewControlProxy -> RegisterRoutes -> BFFMux.ServeHTTP, proving all
+// directly: NewControlProxy -> NewMuxWithHost -> BFFMux.ServeHTTP, proving all
 // five routes are CSRF-protected and that a valid token lets a request all the
-// way through to the real upstream stub.
+// way through to the real upstream stub. (Route registration itself moved from a
+// mux.RegisterRoutes(mux) call a caller made after construction to something
+// NewMuxWithHost does internally, atomically, at construction — see mux.go's Task
+// 27 doc comment — but the observable behavior this test proves, CSRF-protected
+// control routes reachable through a real *BFFMux, is unchanged.)
 func TestControlProxyRegisterRoutesAppliesCSRFThroughRealBFFMux(t *testing.T) {
 	t.Parallel()
 
@@ -411,6 +415,13 @@ func TestControlProxyRegisterRoutesAppliesCSRFThroughRealBFFMux(t *testing.T) {
 
 	stub := &controlUpstreamStub{body: `{"session_id":"` + fixedSID + `"}`}
 	controlProxy := newTrustingControlProxy(t, stub)
+	// This test is only about the control routes; NewMuxWithHost requires a
+	// non-nil eventsProxy too, so a no-op stub stands in (its own behavior is
+	// covered by TestNewMuxWithHostEventsRouteReachableWithNoCSRFToken in
+	// mux_test.go).
+	noopEventsProxy := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 
 	tests := []struct {
 		name       string
@@ -456,13 +467,12 @@ func TestControlProxyRegisterRoutesAppliesCSRFThroughRealBFFMux(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Fresh *BFFMux per case (RegisterRoutes mutates shared mux
-			// state), but the same stub across cases so requestCount is
-			// checked as a delta.
+			// Fresh *BFFMux per case (each NewMuxWithHost call registers
+			// routes on its own fresh *http.ServeMux), but the same stub
+			// across cases so requestCount is checked as a delta.
 			before := stub.requestCount()
 
-			mux := bff.NewMux(read, bff.NewHostOriginGuard(), csrf, true)
-			controlProxy.RegisterRoutes(mux)
+			mux := bff.NewMuxWithHost(read, bff.NewHostOriginGuard(), csrf, controlProxy, noopEventsProxy)
 
 			req := httptest.NewRequest(http.MethodPost, tt.reqPath, nil)
 			req.Host = tt.host

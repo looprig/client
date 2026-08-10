@@ -1,15 +1,31 @@
 package bff_test
 
-// TestNewMux exercises the assembled BFF HTTP surface (mux.go): the mounted
-// ReadSource stripped and mounted under /api, the BFF-synthesized (never
-// proxied) capabilities document, and the HostOriginGuard/CSRFGuard security
-// middleware wired around it. It reuses newMountedSource (mounted_test.go) for a
-// real memstore-backed ReadSource, exactly as that file's own tests do.
+// These tests exercise the assembled BFF HTTP surfaces (mux.go): the two
+// constructors — NewBrowseOnlyMux (no control host; the mounted ReadSource
+// stripped and mounted under /api, and the BFF-synthesized, never-proxied
+// capabilities document) and NewMuxWithHost (control host wired; everything
+// NewBrowseOnlyMux provides plus the five control routes and the events
+// route) — and the HostOriginGuard/CSRFGuard security middleware wired around
+// both. They reuse newMountedSource (mounted_test.go) for a real
+// memstore-backed ReadSource and newTrustingControlProxy (control_test.go) for
+// a real *ControlProxy backed by a TLS stub, exactly as those files' own
+// tests do, plus a local helper (newTrustingEventsProxy) for a real events
+// proxy backed by a TLS stub — so every test here exercises the real exported
+// constructors and real proxy types, never a hand-composed stand-in for
+// either.
+//
+// TestNewBrowseOnlyMuxControlRoutesAbsent is the concrete absence proof this
+// package's Task 27 exists to guarantee: every control-shaped path — the five
+// control routes plus the events route — 404s (genuinely unregistered) when
+// built via NewBrowseOnlyMux, the same convention harness's own
+// TestReadHandlerRoutes proves absence with (see pkg/serve/read_server_test.go
+// and ReadHandler's doc in pkg/serve/mux.go).
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -51,15 +67,58 @@ func getCapabilities(t *testing.T, mux http.Handler) capabilitiesDoc {
 	return doc
 }
 
-// TestNewMuxHostConfiguredCapabilitiesAndReadPlane covers requirement 1: with a
-// control host wired, capabilities advertises the full feature set in the
-// canonical order, and the mounted ReadSource is reachable end-to-end through the
-// /api prefix strip (not just capabilities — the seeded session itself).
-func TestNewMuxHostConfiguredCapabilitiesAndReadPlane(t *testing.T) {
+// okStub is a trivial upstream handler that answers every request 200 with no
+// body. Tests below that need a *ControlProxy or events proxy only to satisfy
+// NewMuxWithHost's required parameters — without exercising that proxy's own
+// request/response behavior, which is control_test.go's and events_test.go's
+// job respectively — point it at okStub.
+var okStub = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+})
+
+// newTrustingEventsProxy starts a TLS upstream and builds a real http.Handler
+// via NewSSEProxy pointed at it, trusting the stub's certificate via
+// WithSSERootCA — the same real-proxy, never-InsecureSkipVerify convention
+// newTrustingControlProxy (control_test.go) uses for the control side.
+func newTrustingEventsProxy(t *testing.T, upstream http.Handler) http.Handler {
+	t.Helper()
+
+	ts := httptest.NewTLSServer(upstream)
+	t.Cleanup(ts.Close)
+
+	upstreamURL, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatalf("url.Parse(%q) err = %v", ts.URL, err)
+	}
+
+	proxy, err := bff.NewSSEProxy(upstreamURL, "mux-test-sse-token", bff.WithSSERootCA(ts.Certificate()))
+	if err != nil {
+		t.Fatalf("NewSSEProxy() err = %v", err)
+	}
+	return proxy
+}
+
+// newTestControlHost builds a real *ControlProxy and a real events proxy
+// http.Handler, both backed by trivial 200-OK TLS stubs — NewMuxWithHost's two
+// required control-host dependencies, for tests that need SOME real instance
+// of each but aren't exercising either proxy's own behavior.
+func newTestControlHost(t *testing.T) (*bff.ControlProxy, http.Handler) {
+	t.Helper()
+	controlProxy := newTrustingControlProxy(t, &controlUpstreamStub{})
+	eventsProxy := newTrustingEventsProxy(t, okStub)
+	return controlProxy, eventsProxy
+}
+
+// TestNewMuxWithHostCapabilitiesAndReadPlane covers a control-host-configured
+// mux: capabilities advertises the full feature set in the canonical order,
+// and the mounted ReadSource is reachable end-to-end through the /api prefix
+// strip (not just capabilities — the seeded session itself).
+func TestNewMuxWithHostCapabilitiesAndReadPlane(t *testing.T) {
 	t.Parallel()
 
 	read, sid := newMountedSource(t)
-	mux := bff.NewMux(read, bff.NewHostOriginGuard(), bff.NewCSRFGuard(time.Hour), true)
+	controlProxy, eventsProxy := newTestControlHost(t)
+	mux := bff.NewMuxWithHost(read, bff.NewHostOriginGuard(), bff.NewCSRFGuard(time.Hour), controlProxy, eventsProxy)
 
 	doc := getCapabilities(t, mux)
 	want := []string{"journal", "live_sse", "ephemeral_sse", "gate_response"}
@@ -79,19 +138,15 @@ func TestNewMuxHostConfiguredCapabilitiesAndReadPlane(t *testing.T) {
 	}
 }
 
-// TestNewMuxBrowseOnlyCapabilitiesReadPlaneAndControlAbsence covers requirement
-// 2: with no control host wired, capabilities advertises journal only, the read
-// plane still works (it is independent of the control host), and a
-// control-shaped path is absent from the mux entirely — proven the same way
-// harness's own TestReadHandlerRoutes proves absence (see
-// pkg/serve/read_server_test.go): 404 or 405, the two codes net/http's ServeMux
-// itself can produce for an unregistered route, and specifically NOT 403, which
-// would mean a route exists but rejected the request.
-func TestNewMuxBrowseOnlyCapabilitiesReadPlaneAndControlAbsence(t *testing.T) {
+// TestNewBrowseOnlyMuxCapabilitiesAndReadPlane covers a browse-only mux:
+// capabilities advertises journal only, and the read plane still works — it
+// is independent of any control host, and NewBrowseOnlyMux never even accepts
+// one.
+func TestNewBrowseOnlyMuxCapabilitiesAndReadPlane(t *testing.T) {
 	t.Parallel()
 
 	read, sid := newMountedSource(t)
-	mux := bff.NewMux(read, bff.NewHostOriginGuard(), bff.NewCSRFGuard(time.Hour), false)
+	mux := bff.NewBrowseOnlyMux(read, bff.NewHostOriginGuard())
 
 	doc := getCapabilities(t, mux)
 	want := []string{"journal"}
@@ -109,13 +164,47 @@ func TestNewMuxBrowseOnlyCapabilitiesReadPlaneAndControlAbsence(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), sid.String()) {
 		t.Errorf("GET /api/v1/sessions body = %s, want it to contain seeded session id %s", rec.Body.String(), sid)
 	}
+}
 
-	controlReq := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
-	controlReq.Host = loopbackHost
-	controlRec := httptest.NewRecorder()
-	mux.ServeHTTP(controlRec, controlReq)
-	if controlRec.Code != http.StatusNotFound && controlRec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("POST /api/v1/sessions status = %d, want 404 or 405 (route must not be registered); body = %s", controlRec.Code, controlRec.Body.String())
+// TestNewBrowseOnlyMuxControlRoutesAbsent is the Task 27 absence proof: every
+// control-shaped path — the five control routes plus the events route — 404s
+// (genuinely unregistered) when built via NewBrowseOnlyMux, never 403 (which
+// would mean a route exists and rejected the request). 404 or 405 are the two
+// codes net/http's ServeMux itself can produce for an unregistered route or a
+// registered path hit with the wrong method — the same convention harness's
+// own TestReadHandlerRoutes proves absence with.
+func TestNewBrowseOnlyMuxControlRoutesAbsent(t *testing.T) {
+	t.Parallel()
+
+	read, _ := newMountedSource(t)
+	mux := bff.NewBrowseOnlyMux(read, bff.NewHostOriginGuard())
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "create", method: http.MethodPost, path: "/api/v1/sessions"},
+		{name: "restore", method: http.MethodPost, path: "/api/v1/sessions/abc/restore"},
+		{name: "input", method: http.MethodPost, path: "/api/v1/sessions/abc/input"},
+		{name: "gate response", method: http.MethodPost, path: "/api/v1/sessions/abc/gates/g1"},
+		{name: "interrupt", method: http.MethodPost, path: "/api/v1/sessions/abc/interrupt"},
+		{name: "events", method: http.MethodGet, path: "/api/v1/sessions/abc/events"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Host = loopbackHost
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s status = %d, want 404 or 405 (route must be genuinely absent, not registered-then-rejected); body = %s", tt.method, tt.path, rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -133,15 +222,18 @@ func (c *countingReadSource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// TestNewMuxAppliesHostOriginGuardBeforeReadSource covers requirement 3's guard
-// half: a rebound Host header hitting GET /api/v1/sessions is rejected 403 by
-// HostOriginGuard before the mounted ReadSource ever runs, and the same guard
-// also protects the BFF's own synthesized capabilities route.
+// TestNewMuxAppliesHostOriginGuardBeforeReadSource covers the guard half of
+// both constructors: a rebound Host header hitting GET /api/v1/sessions is
+// rejected 403 by HostOriginGuard before the mounted ReadSource ever runs,
+// and the same guard also protects the BFF's own synthesized capabilities
+// route. Built via NewBrowseOnlyMux — HostOriginGuard's placement (wrapping
+// the whole returned handler) is identical for NewMuxWithHost, which needs no
+// separate proof of the same property.
 func TestNewMuxAppliesHostOriginGuardBeforeReadSource(t *testing.T) {
 	t.Parallel()
 
 	read := &countingReadSource{}
-	mux := bff.NewMux(read, bff.NewHostOriginGuard(), bff.NewCSRFGuard(time.Hour), true)
+	mux := bff.NewBrowseOnlyMux(read, bff.NewHostOriginGuard())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions", nil)
 	req.Host = "evil.example:7777"
@@ -174,53 +266,40 @@ func mustMint(t *testing.T, csrf *bff.CSRFGuard) string {
 	return token
 }
 
-// TestNewMuxRegisterControlRouteAppliesCSRF covers requirement 4, through the
-// real exported API rather than a hand-composed handler chain outside it.
-//
-// Control routes (input/gates/interrupt/create/restore) don't exist as code yet
-// — a later task builds the control host proxy and registers them. What this
-// test proves in the meantime: BFFMux.RegisterControlRoute — the ONLY sanctioned
-// way to add a state-changing route (see mux.go's doc comment) — always applies
-// the same *CSRFGuard NewMux was constructed with, and HostOriginGuard still
-// runs first (guard.Wrap wraps the whole *BFFMux). This exercises the production
-// code path directly: NewMux -> RegisterControlRoute -> mux.ServeHTTP, not a
-// composition assembled by the test itself.
-func TestNewMuxRegisterControlRouteAppliesCSRF(t *testing.T) {
+// TestNewMuxWithHostControlRoutesRequireCSRF proves NewMuxWithHost's
+// internally-registered control routes are CSRF-protected end to end, through
+// the real production wiring path (NewMuxWithHost -> BFFMux.ServeHTTP), not a
+// composition the test assembles itself. control_test.go's
+// TestControlProxyRegisterRoutesAppliesCSRFThroughRealBFFMux already covers
+// all five routes and rebound-host interaction in depth; this test's own job
+// is narrower and complementary — proving the property from NewMuxWithHost's
+// perspective (its own constructor, its own real *ControlProxy), one
+// representative control route.
+func TestNewMuxWithHostControlRoutesRequireCSRF(t *testing.T) {
 	t.Parallel()
 
 	read, _ := newMountedSource(t)
 	csrf := bff.NewCSRFGuard(time.Hour)
 	validToken := mustMint(t, csrf)
+	controlProxy, eventsProxy := newTestControlHost(t)
 
 	tests := []struct {
-		name       string
-		host       string
-		token      string // "" means no X-CSRF-Token header at all
-		want       int
-		wantCalled bool
+		name  string
+		token string // "" means no X-CSRF-Token header at all
+		want  int
 	}{
-		{name: "good host, no csrf token: csrf rejects", host: loopbackHost, token: "", want: http.StatusForbidden, wantCalled: false},
-		{name: "bad host, valid csrf token: guard rejects first", host: "evil.example:7777", token: validToken, want: http.StatusForbidden, wantCalled: false},
-		{name: "good host, valid csrf token: reaches handler", host: loopbackHost, token: validToken, want: http.StatusOK, wantCalled: true},
+		{name: "no csrf token: rejected", token: "", want: http.StatusForbidden},
+		{name: "valid csrf token: reaches upstream", token: validToken, want: http.StatusOK},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			// Fresh *BFFMux per case: RegisterControlRoute mutates shared mux state,
-			// and subtests run in parallel with each other.
-			mux := bff.NewMux(read, bff.NewHostOriginGuard(), csrf, true)
-
-			called := false
-			controlHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				called = true
-				w.WriteHeader(http.StatusOK)
-			})
-			mux.RegisterControlRoute("POST /api/v1/sessions/{sid}/input", controlHandler)
+			mux := bff.NewMuxWithHost(read, bff.NewHostOriginGuard(), csrf, controlProxy, eventsProxy)
 
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/abc/input", nil)
-			req.Host = tt.host
+			req.Host = loopbackHost
 			if tt.token != "" {
 				req.Header.Set(bff.CSRFHeaderName, tt.token)
 			}
@@ -228,59 +307,75 @@ func TestNewMuxRegisterControlRouteAppliesCSRF(t *testing.T) {
 			mux.ServeHTTP(rec, req)
 
 			if rec.Code != tt.want {
-				t.Errorf("status = %d, want %d", rec.Code, tt.want)
-			}
-			if called != tt.wantCalled {
-				t.Errorf("handler called = %v, want %v", called, tt.wantCalled)
+				t.Errorf("status = %d, want %d; body = %s", rec.Code, tt.want, rec.Body.String())
 			}
 		})
 	}
 }
 
-// TestNewMuxRegisterEventsRouteIsReachableWithNoCSRFToken proves
-// RegisterEventsRoute (mux.go) wires a handler directly onto the mux — reachable
-// through HostOriginGuard exactly like every other route, but with NO CSRF token
-// required at all, even though no token was minted or presented. This is the
-// intended difference from RegisterControlRoute: an SSE proxy route is a GET
-// (read), never state-changing, so it must never depend on the SPA having
-// already obtained a CSRF token (a chicken-and-egg problem for the very first
-// request opening a live stream).
-func TestNewMuxRegisterEventsRouteIsReachableWithNoCSRFToken(t *testing.T) {
+// TestNewMuxWithHostEventsRouteReachableWithNoCSRFToken proves NewMuxWithHost
+// wires the events route WITHOUT CSRF protection, even though the SAME mux
+// requires a CSRF token for control routes — the intended asymmetry (mux.go's
+// registerEventsRoute doc): an SSE proxy route is a GET (read), never
+// state-changing, so it must never depend on the SPA having already obtained
+// a CSRF token (a chicken-and-egg problem for the very first request opening
+// a live stream). HostOriginGuard still applies, exactly as it does for every
+// other route.
+func TestNewMuxWithHostEventsRouteReachableWithNoCSRFToken(t *testing.T) {
 	t.Parallel()
 
 	read, _ := newMountedSource(t)
-	mux := bff.NewMux(read, bff.NewHostOriginGuard(), bff.NewCSRFGuard(time.Hour), true)
-
-	called := false
-	eventsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.RegisterEventsRoute("GET /api/v1/sessions/{sid}/events", eventsHandler)
+	controlProxy, eventsProxy := newTestControlHost(t)
+	mux := bff.NewMuxWithHost(read, bff.NewHostOriginGuard(), bff.NewCSRFGuard(time.Hour), controlProxy, eventsProxy)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/abc/events", nil)
 	req.Host = loopbackHost
 	// Deliberately no X-CSRF-Token header.
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET events route status = %d, want %d (no CSRF token should ever be required for a GET)", rec.Code, http.StatusOK)
-	}
-	if !called {
-		t.Error("events handler was never called")
+		t.Fatalf("GET events route status = %d, want %d (no CSRF token should ever be required for a GET); body = %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	// HostOriginGuard still applies: a rebound Host must still be rejected.
 	badHostReq := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/abc/events", nil)
 	badHostReq.Host = "evil.example:7777"
 	badHostRec := httptest.NewRecorder()
-	called = false
 	mux.ServeHTTP(badHostRec, badHostReq)
 	if badHostRec.Code != http.StatusForbidden {
 		t.Errorf("GET events route with rebound host status = %d, want %d", badHostRec.Code, http.StatusForbidden)
 	}
-	if called {
-		t.Error("events handler was reached despite a rebound Host header; HostOriginGuard must reject first")
+}
+
+// TestNewMuxWithHostPanicsOnNilDependencies proves the fail-loud-at-construction
+// contract NewMuxWithHost's doc promises: a nil csrf, controlProxy, or
+// eventsProxy is a broken composition and panics immediately, rather than
+// silently shipping a mux that advertises the full feature set with some of
+// its routes missing.
+func TestNewMuxWithHostPanicsOnNilDependencies(t *testing.T) {
+	t.Parallel()
+
+	read, _ := newMountedSource(t)
+	guard := bff.NewHostOriginGuard()
+	csrf := bff.NewCSRFGuard(time.Hour)
+	controlProxy, eventsProxy := newTestControlHost(t)
+
+	tests := []struct {
+		name string
+		call func()
+	}{
+		{name: "nil csrf", call: func() { bff.NewMuxWithHost(read, guard, nil, controlProxy, eventsProxy) }},
+		{name: "nil controlProxy", call: func() { bff.NewMuxWithHost(read, guard, csrf, nil, eventsProxy) }},
+		{name: "nil eventsProxy", call: func() { bff.NewMuxWithHost(read, guard, csrf, controlProxy, nil) }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Errorf("call did not panic, want a panic for %s", tt.name)
+				}
+			}()
+			tt.call()
+		})
 	}
 }
