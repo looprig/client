@@ -75,6 +75,8 @@ func TestHostOriginGuard(t *testing.T) {
 		{name: "origin empty scheme host only path", host: "127.0.0.1:7777", origin: "evil.example", want: http.StatusForbidden},
 		{name: "loopback with attacker subdomain host", host: "127.0.0.1.evil.example:7777", origin: "", want: http.StatusForbidden},
 		{name: "origin with userinfo rejected even though hostname is allowed", host: "127.0.0.1:7777", origin: "http://evil.example@127.0.0.1:7777", want: http.StatusForbidden},
+		{name: "uppercase localhost host", host: "LOCALHOST:7777", origin: "", want: http.StatusOK},
+		{name: "mixed case origin host", host: "127.0.0.1:7777", origin: "http://LocalHost:7777", want: http.StatusOK},
 	}
 
 	guard := bff.NewHostOriginGuard()

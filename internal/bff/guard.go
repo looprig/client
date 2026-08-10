@@ -46,8 +46,12 @@ func NewHostOriginGuard(extraAllowedHosts ...string) *HostOriginGuard {
 	for _, h := range defaultAllowedHosts {
 		allowed[h] = true
 	}
+	// extraAllowedHosts is caller-supplied and may arrive in any case; the
+	// allowlist itself is canonically lowercase (hostAllowed and originAllowed
+	// both lowercase the incoming value before lookup), so store it lowercase
+	// here too rather than requiring every caller to know that convention.
 	for _, h := range extraAllowedHosts {
-		allowed[h] = true
+		allowed[strings.ToLower(h)] = true
 	}
 	return &HostOriginGuard{allowedHosts: allowed}
 }
@@ -79,20 +83,24 @@ func (g *HostOriginGuard) Wrap(next http.Handler) http.Handler {
 
 // hostAllowed reports whether hostHeader (r.Host) names one of g's allowed
 // hosts, on any port. An empty or unparseable Host fails secure: false.
+// Hostnames are compared case-insensitively (RFC 3986/952): the extracted host
+// is lowercased before the allowlist lookup, which is itself keyed in
+// lowercase (see defaultAllowedHosts and NewHostOriginGuard).
 func (g *HostOriginGuard) hostAllowed(hostHeader string) bool {
 	host, ok := splitHost(hostHeader)
 	if !ok || host == "" {
 		return false
 	}
-	return g.allowedHosts[host]
+	return g.allowedHosts[strings.ToLower(host)]
 }
 
 // originAllowed reports whether origin (an Origin header value) names one of g's
 // allowed hosts, ignoring scheme and port — only the hostname component is
-// compared, symmetric with hostAllowed's "any port" treatment of the Host
-// header. An unparseable Origin, or one with no host at all (e.g. the literal
-// string "null" browsers send for some sandboxed/cross-origin contexts), fails
-// secure: false. An Origin carrying userinfo (e.g.
+// compared, symmetric with hostAllowed's "any port" and case-insensitive
+// treatment of the Host header. An unparseable Origin, or one with no host at
+// all (e.g. the literal string "null" browsers send for some
+// sandboxed/cross-origin contexts), fails secure: false. An Origin carrying
+// userinfo (e.g.
 // "http://evil.example@127.0.0.1/") is also rejected: real browsers never
 // construct an Origin header with a userinfo component, so this isn't
 // exploitable under the actual threat model, but url.URL.Hostname() ignores
@@ -108,7 +116,7 @@ func (g *HostOriginGuard) originAllowed(origin string) bool {
 	if u.User != nil {
 		return false
 	}
-	host := u.Hostname()
+	host := strings.ToLower(u.Hostname())
 	if host == "" {
 		return false
 	}
