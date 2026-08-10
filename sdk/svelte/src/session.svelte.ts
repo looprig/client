@@ -52,6 +52,34 @@ import type {
 } from "@looprig/client";
 
 /**
+ * Tracks overlapping `refresh()` calls for one store instance so that, if
+ * responses resolve out of order (a double-click, a re-firing `$effect`,
+ * rapid paging), only the LAST-STARTED call's result is ever committed to
+ * `$state` — an earlier call's now-stale response is discarded rather than
+ * clobbering a fresher one. Shared by all three stores below since each
+ * follows the identical "start a generation, await the transport call,
+ * commit only if this generation is still current" shape.
+ */
+class RefreshGuard {
+  private generation = 0;
+
+  /**
+   * Begins a new call, superseding any earlier one still in flight. Returns
+   * this call's generation number — pass it to `isCurrent()` once the
+   * awaited transport call resolves, to decide whether to commit.
+   */
+  start(): number {
+    this.generation += 1;
+    return this.generation;
+  }
+
+  /** True if `generation` is still the most recently started call, i.e. no newer `refresh()` has begun since. */
+  isCurrent(generation: number): boolean {
+    return generation === this.generation;
+  }
+}
+
+/**
  * Reactive wrapper over `LooprigTransport.listSessions`: a page of session
  * summaries plus the paging cursor (`skip`/`limit`/`nextSkip`/`done`, mirrored
  * from `SessionList` — see sdk/core's `session_list.schema.json`), exposed as
@@ -66,6 +94,12 @@ import type {
  * method a consumer calls (e.g. from a component's `$effect` or an event
  * handler), and the last call's result — or in-flight state — is all that's
  * ever live.
+ *
+ * `refresh()` calls may overlap (e.g. a double-click, a re-firing `$effect`,
+ * rapid paging). A `RefreshGuard` ensures that if responses arrive out of
+ * order, only the LAST-STARTED call's result is committed: a stale response
+ * is discarded silently, and `loading` stays `true` until the latest call
+ * settles rather than flipping `false` when a superseded call finishes.
  */
 export class SessionListStore {
   sessions = $state<SessionSummary[]>([]);
@@ -76,22 +110,27 @@ export class SessionListStore {
   loading = $state(false);
   error = $state<Error | null>(null);
 
+  private readonly guard = new RefreshGuard();
+
   constructor(private readonly transport: LooprigTransport) {}
 
-  /** Issues `listSessions(options)` and republishes the page as state. */
+  /** Issues `listSessions(options)` and republishes the page as state — unless a newer `refresh()` call has since superseded this one. */
   async refresh(options?: ListSessionsOptions): Promise<void> {
+    const generation = this.guard.start();
     this.loading = true;
     this.error = null;
     try {
       const page: SessionList = await this.transport.listSessions(options);
+      if (!this.guard.isCurrent(generation)) return;
       this.sessions = page.sessions;
       this.skip = page.skip;
       this.limit = page.limit;
       this.nextSkip = page.next_skip;
       this.done = page.done;
+      this.loading = false;
     } catch (err) {
+      if (!this.guard.isCurrent(generation)) return;
       this.error = asError(err);
-    } finally {
       this.loading = false;
     }
   }
@@ -102,27 +141,35 @@ export class SessionListStore {
  * session id: exposes that session's last-projected `SessionStatus` as
  * state. Same loading/error contract as `SessionListStore.refresh` — a
  * failed `refresh()` sets `error` and leaves the previous `status` in place
- * rather than clearing it.
+ * rather than clearing it. Same overlapping-call guard as `SessionListStore`
+ * (see `RefreshGuard`): a stale response from a superseded `refresh()` call
+ * is discarded, and `loading` reflects the latest call only.
  */
 export class SessionStatusStore {
   status = $state<SessionStatus | null>(null);
   loading = $state(false);
   error = $state<Error | null>(null);
 
+  private readonly guard = new RefreshGuard();
+
   constructor(
     private readonly transport: LooprigTransport,
     private readonly sessionId: string,
   ) {}
 
-  /** Issues `readStatus(sessionId, options)` and republishes the result as state. */
+  /** Issues `readStatus(sessionId, options)` and republishes the result as state — unless a newer `refresh()` call has since superseded this one. */
   async refresh(options?: RequestOptions): Promise<void> {
+    const generation = this.guard.start();
     this.loading = true;
     this.error = null;
     try {
-      this.status = await this.transport.readStatus(this.sessionId, options);
+      const status = await this.transport.readStatus(this.sessionId, options);
+      if (!this.guard.isCurrent(generation)) return;
+      this.status = status;
+      this.loading = false;
     } catch (err) {
+      if (!this.guard.isCurrent(generation)) return;
       this.error = asError(err);
-    } finally {
       this.loading = false;
     }
   }
@@ -140,7 +187,9 @@ export class SessionStatusStore {
  * `SessionListStore`'s single-page-replace pattern for the journal's page
  * shape. A caller that wants the next page passes
  * `{ fromJournalSeq: store.nextJournalSeq }` to the next `refresh()` call
- * itself.
+ * itself. Same overlapping-call guard as `SessionListStore` (see
+ * `RefreshGuard`): a stale response from a superseded `refresh()` call is
+ * discarded, and `loading` reflects the latest call only.
  */
 export class SessionHistoryStore {
   events = $state<StatusEvent[]>([]);
@@ -149,23 +198,28 @@ export class SessionHistoryStore {
   loading = $state(false);
   error = $state<Error | null>(null);
 
+  private readonly guard = new RefreshGuard();
+
   constructor(
     private readonly transport: LooprigTransport,
     private readonly sessionId: string,
   ) {}
 
-  /** Issues `readHistory(sessionId, options)` and republishes the page as state. */
+  /** Issues `readHistory(sessionId, options)` and republishes the page as state — unless a newer `refresh()` call has since superseded this one. */
   async refresh(options?: ReadHistoryOptions): Promise<void> {
+    const generation = this.guard.start();
     this.loading = true;
     this.error = null;
     try {
       const page: EventJournalPage = await this.transport.readHistory(this.sessionId, options);
+      if (!this.guard.isCurrent(generation)) return;
       this.events = page.events;
       this.nextJournalSeq = page.next_journal_seq;
       this.done = page.done;
+      this.loading = false;
     } catch (err) {
+      if (!this.guard.isCurrent(generation)) return;
       this.error = asError(err);
-    } finally {
       this.loading = false;
     }
   }

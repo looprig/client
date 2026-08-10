@@ -136,6 +136,76 @@ describe("SessionListStore", () => {
       expect(store.error).toBeNull();
     });
   });
+
+  it("keeps the later-started refresh()'s result when responses resolve out of order", async () => {
+    const transport = new FakeTransport();
+    const store = new SessionListStore(transport);
+
+    const firstPage: SessionList = { ...sessionListPage, skip: 0 };
+    const secondPage: SessionList = {
+      ...sessionListPage,
+      skip: 10,
+      sessions: [{ session_id: "22222222-2222-2222-2222-222222222222", title: "second" }],
+    };
+
+    // Start the first call...
+    const first = deferred<SessionList>();
+    transport.listSessionsResult = first.promise;
+    const firstRefresh = store.refresh({ skip: 0 });
+
+    // ...then start a second, overlapping call before the first settles.
+    const second = deferred<SessionList>();
+    transport.listSessionsResult = second.promise;
+    const secondRefresh = store.refresh({ skip: 10 });
+
+    expect(store.loading).toBe(true);
+
+    // The SECOND (later-started) call's response arrives FIRST.
+    second.resolve(secondPage);
+    await secondRefresh;
+
+    expect(store.loading).toBe(false);
+    expect(store.sessions).toEqual(secondPage.sessions);
+    expect(store.skip).toBe(10);
+
+    // The FIRST call's response arrives AFTER — it is now stale and must be
+    // discarded rather than overwriting the fresher result already committed.
+    first.resolve(firstPage);
+    await firstRefresh;
+
+    expect(store.sessions).toEqual(secondPage.sessions);
+    expect(store.skip).toBe(10);
+    expect(store.loading).toBe(false);
+  });
+
+  it("keeps loading true when a stale (superseded) call settles before the latest call is still in flight", async () => {
+    const transport = new FakeTransport();
+    const store = new SessionListStore(transport);
+
+    const first = deferred<SessionList>();
+    transport.listSessionsResult = first.promise;
+    const firstRefresh = store.refresh();
+
+    const second = deferred<SessionList>();
+    transport.listSessionsResult = second.promise;
+    const secondRefresh = store.refresh();
+
+    // The stale (first) call settles while the latest (second) call is still
+    // outstanding.
+    first.resolve(sessionListPage);
+    await firstRefresh;
+
+    // Its result must not be committed, and loading must remain true — the
+    // truly latest call hasn't settled yet.
+    expect(store.sessions).toEqual([]);
+    expect(store.loading).toBe(true);
+
+    second.resolve(sessionListPage);
+    await secondRefresh;
+
+    expect(store.loading).toBe(false);
+    expect(store.sessions).toEqual(sessionListPage.sessions);
+  });
 });
 
 describe("SessionStatusStore", () => {
@@ -177,6 +247,38 @@ describe("SessionStatusStore", () => {
     expect(store.loading).toBe(false);
     expect(store.error).toBe(failure);
     expect(store.status).toEqual(sessionStatus);
+  });
+
+  it("keeps the later-started refresh()'s result when responses resolve out of order", async () => {
+    const transport = new FakeTransport();
+    const store = new SessionStatusStore(transport, sessionId);
+
+    const firstStatus: SessionStatus = { ...sessionStatus, last_journal_seq: 5, state: "idle" };
+    const secondStatus: SessionStatus = { ...sessionStatus, last_journal_seq: 9, state: "running" };
+
+    const first = deferred<SessionStatus>();
+    transport.readStatusResult = first.promise;
+    const firstRefresh = store.refresh();
+
+    const second = deferred<SessionStatus>();
+    transport.readStatusResult = second.promise;
+    const secondRefresh = store.refresh();
+
+    expect(store.loading).toBe(true);
+
+    // The SECOND (later-started) call's response arrives FIRST.
+    second.resolve(secondStatus);
+    await secondRefresh;
+
+    expect(store.loading).toBe(false);
+    expect(store.status).toEqual(secondStatus);
+
+    // The FIRST call's response arrives AFTER — stale, must be discarded.
+    first.resolve(firstStatus);
+    await firstRefresh;
+
+    expect(store.status).toEqual(secondStatus);
+    expect(store.loading).toBe(false);
   });
 });
 
@@ -247,5 +349,42 @@ describe("SessionHistoryStore", () => {
     expect(store.events).toEqual(secondPage.events);
     expect(store.nextJournalSeq).toBe(3);
     expect(store.done).toBe(true);
+  });
+
+  it("keeps the later-started refresh()'s result when responses resolve out of order", async () => {
+    const transport = new FakeTransport();
+    const store = new SessionHistoryStore(transport, sessionId);
+
+    const secondPage: EventJournalPage = {
+      events: [{ journal_seq: 5, event: { type: "step_completed", v: 1 } }],
+      next_journal_seq: 6,
+      done: true,
+    };
+
+    const first = deferred<EventJournalPage>();
+    transport.readHistoryResult = first.promise;
+    const firstRefresh = store.refresh();
+
+    const second = deferred<EventJournalPage>();
+    transport.readHistoryResult = second.promise;
+    const secondRefresh = store.refresh({ fromJournalSeq: 5 });
+
+    expect(store.loading).toBe(true);
+
+    // The SECOND (later-started) call's response arrives FIRST.
+    second.resolve(secondPage);
+    await secondRefresh;
+
+    expect(store.loading).toBe(false);
+    expect(store.events).toEqual(secondPage.events);
+    expect(store.nextJournalSeq).toBe(6);
+
+    // The FIRST call's response arrives AFTER — stale, must be discarded.
+    first.resolve(historyPage);
+    await firstRefresh;
+
+    expect(store.events).toEqual(secondPage.events);
+    expect(store.nextJournalSeq).toBe(6);
+    expect(store.loading).toBe(false);
   });
 });
