@@ -279,6 +279,20 @@ describe("session detail route (live transcript)", () => {
 
 		await expect.poll(() => connection.returnCalls).toBeGreaterThanOrEqual(1);
 	});
+
+	it("rebinds the live subscription when transport changes without changing the session id", async () => {
+		const firstTransport = new FakeTransport();
+		const live = new FakeLiveSource();
+		const rendered = await render(SessionDetailPage, { transport: firstTransport, liveSource: live.open, sid: testSid });
+		await expect.element(browserPage.getByTestId("live-status")).toHaveTextContent("Live");
+
+		const firstConnection = live.connections[0]!;
+		const replacementTransport = new FakeTransport();
+		await rendered.rerender({ transport: replacementTransport, sid: testSid });
+
+		await expect.poll(() => firstConnection.returnCalls).toBeGreaterThanOrEqual(1);
+		await expect.poll(() => live.connections).toHaveLength(2);
+	});
 });
 
 describe("session detail route: stick-to-bottom autoscroll", () => {

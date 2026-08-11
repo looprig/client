@@ -5,7 +5,10 @@ import {
   joinSessionView,
   textBlock,
   type GateApprovalAction,
+  type FetchLike,
+  type LiveFrameSource,
   type LooprigClient,
+  type SseFrame,
   type SessionView,
 } from "../src/index.js";
 
@@ -14,20 +17,52 @@ export interface SessionListener {
   onError(error: Error): void;
 }
 
+export type LiveSourceFactory = (sessionId: string, signal: AbortSignal) => LiveFrameSource;
+
+export interface SessionClientOptions {
+  /** Match the BFF transport's base URL when the default transport is used. */
+  baseUrl?: string;
+  /** Match the BFF transport's injected fetch when the default transport is used. */
+  fetch?: FetchLike;
+  /** Supply a deterministic/custom live source alongside an injected transport. */
+  liveSource?: LiveSourceFactory;
+}
+
+type InjectedSessionClientOptions = SessionClientOptions & { liveSource: LiveSourceFactory };
+
 /**
  * Framework-neutral session facade. The core SDK owns transport, validated
  * wire DTOs, history/live joining, state folding, and actions; a UI binding
  * only subscribes to SessionView and forwards user intent.
  */
 export class SessionClient {
-  constructor(private readonly client: LooprigClient = createBFFClient()) {}
+  private readonly client: LooprigClient;
+  private readonly liveSource: LiveSourceFactory;
+
+  constructor();
+  constructor(client: undefined, options?: SessionClientOptions);
+  constructor(client: LooprigClient, options: InjectedSessionClientOptions);
+  constructor(client?: LooprigClient, options: SessionClientOptions = {}) {
+    if (client !== undefined && options.liveSource === undefined) {
+      throw new TypeError("SessionClient requires options.liveSource when a custom client is injected");
+    }
+    this.client = client ?? createBFFClient({ baseUrl: options.baseUrl, fetch: options.fetch });
+    this.liveSource =
+      options.liveSource ??
+      ((id, _signal) =>
+        createFetchLiveFrameSource(id, {
+          baseUrl: options.baseUrl,
+          fetch: options.fetch,
+        }));
+  }
 
   connect(sessionId: string, listener: SessionListener): () => void {
     const controller = new AbortController();
+    const { source, cancelActive } = cancelableLiveSource(this.liveSource(sessionId, controller.signal));
     const updates = joinSessionView(
       this.client,
       sessionId,
-      createFetchLiveFrameSource(sessionId),
+      source,
       { autoReconnect: true, signal: controller.signal },
     );
 
@@ -44,6 +79,7 @@ export class SessionClient {
 
     return () => {
       controller.abort();
+      cancelActive();
       void updates.return(undefined);
     };
   }
@@ -65,6 +101,30 @@ export class SessionClient {
   async interrupt(sessionId: string): Promise<void> {
     await this.client.interrupt(sessionId);
   }
+}
+
+function cancelableLiveSource(inner: LiveFrameSource): { source: LiveFrameSource; cancelActive: () => void } {
+  let activeIterator: AsyncIterator<SseFrame, void, void> | undefined;
+
+  const source: LiveFrameSource = () => {
+    const iterable = inner();
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<SseFrame, void, void> {
+        const iterator = iterable[Symbol.asyncIterator]();
+        activeIterator = iterator;
+        return iterator;
+      },
+    };
+  };
+
+  const cancelActive = (): void => {
+    const iterator = activeIterator;
+    activeIterator = undefined;
+    const result = iterator?.return?.();
+    if (result !== undefined) void Promise.resolve(result).catch(() => {});
+  };
+
+  return { source, cancelActive };
 }
 
 function asError(cause: unknown): Error {

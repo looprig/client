@@ -62,17 +62,17 @@
 
 	const sessionId = $derived(sid ?? page.params.sid ?? "");
 
-	// Rebuilt whenever `sessionId` (or a test's fixed `liveSource`) changes —
-	// same "$derived store, $effect drives its lifecycle" split as Task 20's
-	// route, generalized to a start()/stop() subscription instead of a single
-	// refresh(). `transport` is captured once via `untrack` (matches Task
-	// 20's own reasoning: swapping transports mid-session isn't real).
+	// Rebuilt whenever `sessionId`, `transport`, or a test's fixed `liveSource`
+	// changes — same "$derived store, $effect drives its lifecycle" split as
+	// Task 20's route, generalized to a start()/stop() subscription instead of
+	// a single refresh(). Keeping transport reactive lets a host replace an
+	// injected transport without leaving the old live subscription running.
 	// `LooprigTransport` structurally satisfies `JournalReader` (both declare
 	// the identical `readHistory` method) — no adapter needed, exactly as
 	// join.ts's own `JournalReader` doc comment says.
 	const store = $derived(
 		new LiveSessionViewStore(
-			untrack(() => transport),
+			transport,
 			sessionId,
 			liveSource ?? createFetchLiveFrameSource(sessionId),
 		),
@@ -94,8 +94,9 @@
 	$effect(() => {
 		if (!sessionId) return;
 		atBottom = true;
-		untrack(() => store.start());
-		return () => untrack(() => store.stop());
+		const currentStore = store;
+		untrack(() => currentStore.start());
+		return () => untrack(() => currentStore.stop());
 	});
 
 	// --- Gate approval + composer (Task 29) ---
@@ -105,18 +106,18 @@
 	// gate state at all (`GatePrepared` is explicitly excluded from the
 	// journal page, and ephemeral frames don't cover gates either — see
 	// interaction.svelte.ts's own module comment for the full trail). Rebuilt
-	// alongside `store` whenever `sessionId` changes, same
-	// `untrack(() => transport)` + reactive-`sessionId` split.
-	const gateStore = $derived(new GateStore(untrack(() => transport), sessionId));
-	const composer = $derived(new SessionComposerStore(untrack(() => transport), sessionId));
+	// alongside `store` whenever `sessionId` or `transport` changes.
+	const gateStore = $derived(new GateStore(transport, sessionId));
+	const composer = $derived(new SessionComposerStore(transport, sessionId));
 
 	// Same `untrack` reasoning as the live-join effect above: `start()`/`stop()`
 	// read/write `GateStore`'s own `$state` fields, and without `untrack` this
 	// effect would end up "subscribed" to its own store's polling state.
 	$effect(() => {
 		if (!sessionId) return;
-		untrack(() => gateStore.start());
-		return () => untrack(() => gateStore.stop());
+		const currentGateStore = gateStore;
+		untrack(() => currentGateStore.start());
+		return () => untrack(() => currentGateStore.stop());
 	});
 
 	/**

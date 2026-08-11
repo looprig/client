@@ -3,6 +3,6 @@
   "private": true,
   "workspaces": ["sdk/core", "sdk/svelte", "app"],
   "scripts": {
-    "docs:examples": "npm run typecheck:examples --workspace @looprig/client && npm run typecheck:examples --workspace @looprig/svelte && tsc -p examples/docs/stage20_web_client/tsconfig.json && svelte-check --workspace examples/docs/stage20_web_client --config svelte.config.js --tsconfig tsconfig.json --fail-on-warnings"
+    "docs:examples": "npm run typecheck:examples --workspace @looprig/client && npm run typecheck:examples --workspace @looprig/svelte && tsc -p examples/docs/stage20_web_client/tsconfig.json && svelte-check --workspace examples/docs/stage20_web_client --config svelte.config.js --tsconfig tsconfig.json --fail-on-warnings && npm --prefix sdk/core run proof:examples && npx vitest run --config examples/docs/stage20_web_client/vitest.config.mjs session-client.test.ts --dir examples/docs/stage20_web_client"
   }
 }

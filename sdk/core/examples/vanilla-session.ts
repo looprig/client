@@ -1,13 +1,17 @@
 import type { SessionView } from "../src/index.js";
-import { SessionClient } from "./session-client.js";
+import { SessionClient, type SessionClientOptions } from "./session-client.js";
 
 /** Bind a session to ordinary DOM elements. No UI framework is required. */
-export function bindVanillaSession(root: HTMLElement, sessionId: string): () => void {
+export function bindVanillaSession(
+  root: HTMLElement,
+  sessionId: string,
+  options: SessionClientOptions = {},
+): () => void {
   const output = requiredElement<HTMLOutputElement>(root, "[data-session-output]");
   const form = requiredElement<HTMLFormElement>(root, "[data-session-form]");
   const input = requiredElement<HTMLInputElement>(root, "[data-session-input]");
   const interrupt = requiredElement<HTMLButtonElement>(root, "[data-session-interrupt]");
-  const client = new SessionClient();
+  const client = new SessionClient(undefined, options);
 
   const render = (view: SessionView): void => {
     output.textContent = view.content

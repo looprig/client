@@ -4,20 +4,33 @@
     GATE_APPROVAL_ACTIONS,
     createBFFClient,
     createFetchLiveFrameSource,
+    type LiveFrameSource,
     type LooprigTransport,
   } from "@looprig/client";
   import { GateStore, LiveSessionViewStore, SessionComposerStore } from "@looprig/svelte";
 
-  let { sessionId, transport = createBFFClient() }: { sessionId: string; transport?: LooprigTransport } = $props();
-  const live = $derived(new LiveSessionViewStore(transport, sessionId, createFetchLiveFrameSource(sessionId)));
+  let {
+    sessionId,
+    transport = createBFFClient(),
+    liveSource: providedLiveSource,
+  }: { sessionId: string; transport?: LooprigTransport; liveSource?: LiveFrameSource } = $props();
+  const live = $derived(
+    new LiveSessionViewStore(
+      transport,
+      sessionId,
+      providedLiveSource ?? createFetchLiveFrameSource(sessionId),
+    ),
+  );
   const composer = $derived(new SessionComposerStore(transport, sessionId));
   const gate = $derived(new GateStore(transport, sessionId));
   let draft = $state("");
 
   $effect(() => {
     if (sessionId === "") return;
-    untrack(() => { live.start(); gate.start(); });
-    return () => untrack(() => { live.stop(); gate.stop(); });
+    const currentLive = live;
+    const currentGate = gate;
+    untrack(() => { currentLive.start(); currentGate.start(); });
+    return () => untrack(() => { currentLive.stop(); currentGate.stop(); });
   });
 
   async function send(event: SubmitEvent): Promise<void> {

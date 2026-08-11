@@ -8,6 +8,11 @@
       "path": "sdk/core/examples/session-client.ts"
     },
     {
+      "id": "example-client-framework-neutral-session-proof",
+      "type": "test",
+      "path": "sdk/core/examples/session-client.test.ts"
+    },
+    {
       "id": "example-client-vanilla-session-binding-source",
       "type": "source",
       "path": "sdk/core/examples/vanilla-session.ts"
@@ -21,6 +26,11 @@
       "id": "example-client-stage20-session-client-source",
       "type": "source",
       "path": "examples/docs/stage20_web_client/session-client.ts"
+    },
+    {
+      "id": "example-client-stage20-session-client-proof",
+      "type": "test",
+      "path": "examples/docs/stage20_web_client/session-client.test.ts"
     },
     {
       "id": "example-client-stage20-vanilla-session-source",
@@ -49,13 +59,14 @@
         "@looprig/client": "source-workspace"
       },
       "offlineCommand": "npm run docs:examples",
-      "assertion": "The compiled framework-neutral facade composes validated transport calls, the exact history/live join, SessionView folding, text submission, gate response, and interrupt without a UI framework.",
+      "assertion": "The deterministic docs proof drives history/live joining, SessionView folding, text submission, gate response, interrupt, and disconnect cleanup through in-memory transport and live doubles without a UI framework.",
       "workflowPath": ".github/workflows/docs-examples.yml",
       "jobId": "docs-examples",
-      "cleanup": "The returned disconnect function aborts the live join; the compile check creates no persistent resources.",
+      "cleanup": "The proof asserts that the returned disconnect function closes the active live iterator; all doubles are in-memory and create no persistent resources.",
       "liveGate": null,
       "proofIds": [
-        "example-client-framework-neutral-session-source"
+        "example-client-framework-neutral-session-source",
+        "example-client-framework-neutral-session-proof"
       ]
     },
     {
@@ -68,10 +79,10 @@
         "@looprig/client": "source-workspace"
       },
       "offlineCommand": "npm run docs:examples",
-      "assertion": "The compiled DOM binding subscribes to framework-neutral SessionView state and forwards submit and interrupt actions, proving no framework adapter is required.",
+      "assertion": "Typechecking verifies that the DOM binding subscribes to framework-neutral SessionView state and forwards submit and interrupt actions without a UI framework.",
       "workflowPath": ".github/workflows/docs-examples.yml",
       "jobId": "docs-examples",
-      "cleanup": "The returned disposer disconnects the session and removes both DOM event listeners.",
+      "cleanup": "The source returns a disposer that disconnects the session and removes both DOM event listeners; the docs command typechecks that binding.",
       "liveGate": null,
       "proofIds": [
         "example-client-vanilla-session-binding-source",
@@ -89,10 +100,10 @@
         "@looprig/svelte": "source-workspace"
       },
       "offlineCommand": "npm run docs:examples",
-      "assertion": "svelte-check proves the optional Svelte convenience stores bind the same core live SessionView and action APIs without duplicating protocol logic.",
+      "assertion": "svelte-check verifies that the optional Svelte convenience stores bind the same core live SessionView and action APIs without duplicating protocol logic.",
       "workflowPath": ".github/workflows/docs-examples.yml",
       "jobId": "docs-examples",
-      "cleanup": "The component effect stops the live and gate stores when it is destroyed.",
+      "cleanup": "The component source wires destruction cleanup to stop the live and gate stores; the docs command typechecks that lifecycle code.",
       "liveGate": null,
       "proofIds": [
         "example-client-svelte-session-page-source"
@@ -110,13 +121,14 @@
         "@looprig/svelte": "source-workspace"
       },
       "offlineCommand": "npm run docs:examples",
-      "assertion": "The stage 20 command typechecks both framework-neutral TypeScript files and runs svelte-check on the optional SessionPage component.",
+      "assertion": "The stage 20 command typechecks both framework-neutral TypeScript files, runs svelte-check on the optional SessionPage component, and executes its deterministic SessionClient cleanup proof.",
       "workflowPath": ".github/workflows/docs-examples.yml",
       "jobId": "docs-examples",
-      "cleanup": "The examples only compile local source-workspace files and create no persistent resources.",
+      "cleanup": "The stage 20 proof closes its in-memory live iterator; the typechecks and proof create no persistent resources.",
       "liveGate": null,
       "proofIds": [
         "example-client-stage20-session-client-source",
+        "example-client-stage20-session-client-proof",
         "example-client-stage20-vanilla-session-source",
         "example-client-stage20-svelte-page-source"
       ]

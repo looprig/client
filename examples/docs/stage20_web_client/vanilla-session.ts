@@ -1,13 +1,17 @@
 import type { SessionView } from "@looprig/client";
-import { SessionClient } from "./session-client.js";
+import { SessionClient, type SessionClientOptions } from "./session-client.js";
 
 /** A complete browser binding using only the DOM and the framework-neutral client. */
-export function bindVanillaSession(root: HTMLElement, sessionId: string): () => void {
+export function bindVanillaSession(
+  root: HTMLElement,
+  sessionId: string,
+  options: SessionClientOptions = {},
+): () => void {
   const output = required<HTMLOutputElement>(root, "[data-session-output]");
   const form = required<HTMLFormElement>(root, "[data-session-form]");
   const input = required<HTMLInputElement>(root, "[data-session-input]");
   const interrupt = required<HTMLButtonElement>(root, "[data-session-interrupt]");
-  const client = new SessionClient();
+  const client = new SessionClient(undefined, options);
 
   const render = (view: SessionView): void => {
     output.textContent = view.content
