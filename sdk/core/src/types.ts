@@ -21,6 +21,7 @@ import {
   ephemeralFrameSchema,
   errorResponseSchema,
   eventEnvelopeSchema,
+  eventHeaderSchema,
   eventJournalPageSchema,
   gateAcceptedResponseSchema,
   gateResponseRequestSchema,
@@ -40,6 +41,12 @@ export type UUID = FromSchema<typeof uuidSchema>;
 /** `contract/schema/event_envelope.schema.json` — refs UUID. */
 export type EventEnvelope = FromSchema<
   typeof eventEnvelopeSchema,
+  { references: [typeof uuidSchema] }
+>;
+
+/** `contract/schema/event_header.schema.json` — refs UUID. */
+export type EventHeader = FromSchema<
+  typeof eventHeaderSchema,
   { references: [typeof uuidSchema] }
 >;
 
@@ -73,10 +80,10 @@ export type EnduringFrame = FromSchema<
   { references: [typeof eventEnvelopeSchema, typeof uuidSchema] }
 >;
 
-/** `contract/schema/ephemeral_frame.schema.json` — refs EventEnvelope (-> UUID). */
+/** `contract/schema/ephemeral_frame.schema.json` — refs EventHeader (-> UUID). */
 export type EphemeralFrame = FromSchema<
   typeof ephemeralFrameSchema,
-  { references: [typeof eventEnvelopeSchema, typeof uuidSchema] }
+  { references: [typeof eventHeaderSchema, typeof uuidSchema] }
 >;
 
 /** `contract/schema/error_response.schema.json` — no refs. */

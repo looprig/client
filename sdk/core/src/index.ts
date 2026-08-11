@@ -29,6 +29,7 @@ export {
   ephemeralFrameSchema,
   errorResponseSchema,
   eventEnvelopeSchema,
+  eventHeaderSchema,
   eventJournalPageSchema,
   gateAcceptedResponseSchema,
   gateResponseRequestSchema,

@@ -25,6 +25,7 @@ import type {
   EphemeralFrame,
   ErrorResponse,
   EventEnvelope,
+  EventHeader,
   EventJournalPage,
   GateAcceptedResponse,
   GateResponseRequest,
@@ -79,6 +80,7 @@ interface SchemaTypeMap {
   ephemeral_frame: EphemeralFrame;
   error_response: ErrorResponse;
   event_envelope: EventEnvelope;
+  event_header: EventHeader;
   event_journal_page: EventJournalPage;
   gate_accepted_response: GateAcceptedResponse;
   gate_response_request: GateResponseRequest;
@@ -170,6 +172,7 @@ export function validateBFFErrorResponse(data: unknown): BFFErrorResponse {
   return data as BFFErrorResponse;
 }
 export const validateEventEnvelope = (data: unknown): EventEnvelope => validate("event_envelope", data);
+export const validateEventHeader = (data: unknown): EventHeader => validate("event_header", data);
 export const validateEventJournalPage = (data: unknown): EventJournalPage => validate("event_journal_page", data);
 export const validateGateAcceptedResponse = (data: unknown): GateAcceptedResponse => validate("gate_accepted_response", data);
 export const validateGateResponseRequest = (data: unknown): GateResponseRequest => validate("gate_response_request", data);

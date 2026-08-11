@@ -78,7 +78,7 @@
  * `kind`-specific case alongside the generic fallback, mirroring how
  * `foldEphemeral` is structured), not a redesign.
  */
-import type { EphemeralFrame, EventEnvelope, StatusEvent } from "./types.js";
+import type { EphemeralFrame, EventEnvelope, EventHeader, StatusEvent } from "./types.js";
 import type { EnduringSseFrame, EphemeralSseFrame, SseFrame } from "./sse.js";
 
 // --- Session view -----------------------------------------------------------
@@ -87,14 +87,14 @@ import type { EnduringSseFrame, EphemeralSseFrame, SseFrame } from "./sse.js";
 export interface TextContentDelta {
   chunkType: "text";
   text: string;
-  header: EventEnvelope | undefined;
+  header: EventHeader | undefined;
 }
 
 /** A `token_delta` thinking chunk, folded from `content.ThinkingChunk`'s tagged wire DTO. */
 export interface ThinkingContentDelta {
   chunkType: "thinking";
   thinking: string;
-  header: EventEnvelope | undefined;
+  header: EventHeader | undefined;
 }
 
 /**
@@ -111,7 +111,7 @@ export interface ToolUseContentDelta {
   id: string;
   name: string;
   inputJson: string;
-  header: EventEnvelope | undefined;
+  header: EventHeader | undefined;
 }
 
 export type ContentDelta = TextContentDelta | ThinkingContentDelta | ToolUseContentDelta;
@@ -153,13 +153,13 @@ export interface ToolCallCard {
   summary: string | undefined;
   isError: boolean | undefined;
   resultPreview: string | undefined;
-  startedHeader: EventEnvelope | undefined;
-  completedHeader: EventEnvelope | undefined;
+  startedHeader: EventHeader | undefined;
+  completedHeader: EventHeader | undefined;
 }
 
 /** An `input_queued` marker. Per the schema, this kind carries no `delta` at all — only `header` (when the server sent one) is representable. */
 export interface QueuedInputMarker {
-  header: EventEnvelope | undefined;
+  header: EventHeader | undefined;
 }
 
 /** A `compaction_started` marker: the attempt id, reason, and context basis the compaction started from. */
@@ -168,7 +168,7 @@ export interface CompactionMarker {
   /** `event.CompactionReason`: 0 = unspecified, 1 = manual, 2 = automatic (no wire-side symbolic encoding — harness marshals the bare `uint8`). */
   reason: number;
   basis: { revision: number; throughEventId: string };
-  header: EventEnvelope | undefined;
+  header: EventHeader | undefined;
 }
 
 /**

@@ -11,38 +11,10 @@
  * result is asserted identical to parsing the same bytes as one whole chunk
  * every time.
  *
- * ## A pre-existing contract bug this parser surfaces for the first time
- *
- * Building a REAL ajv validator over `contract/fixtures/ephemeral_token_delta.sse`
- * (rather than the shallow, non-$ref, top-level-only structural check
- * harness's own `pkg/serve/schema_test.go`'s `TestFixturesMatchSchemaShape`
- * does — see that function's own doc comment: "NOT full JSON-Schema
- * validation (no type or $ref checking)") exposes a genuine, pre-existing
- * bug in the vendored contract, not a bug in this parser:
- *
- *   `contract/schema/ephemeral_frame.schema.json`'s `header` property is
- *   `{ "$ref": "event_envelope.schema.json" }`, which `required`s `type`
- *   and `v`. But the actual wire encoder
- *   (`harness/pkg/serve/ephemeral.go`'s `ephemeralFrame.Header` field) is
- *   typed `event.Header` (`harness/pkg/event/event.go`) and marshaled
- *   directly with NO custom `MarshalJSON` — and `event.Header` has NEITHER
- *   a `type` NOR a `v` field, ever. Every real `ephemeral` SSE frame stamps
- *   a non-empty `Header` (`Coordinates.SessionID` is set on every event, so
- *   `header,omitzero` never actually omits it), so THIS BUG REJECTS EVERY
- *   REAL EPHEMERAL FRAME a running server ever sends, not just this one
- *   fixture's `token_delta` kind.
- *
- * This is out of scope for this task to fix: `contract/schema/` is a
- * verbatim copy of `harness/pkg/serve/testdata/schema/` (see this repo's
- * root `Makefile`'s `contract` target) — the actual fix belongs in harness
- * (either a dedicated header schema matching `event.Header`'s real shape,
- * or dropping `required: ["type","v"]` for this reuse), followed by
- * re-vendoring here. The tests below document the bug precisely (so it
- * doesn't regress further or get "fixed" by accident without noticing) and
- * additionally exercise the SAME parser logic against a hand-built,
- * schema-CONFORMANT ephemeral frame so the parser's happy path for
- * `ephemeral` frames is still proven correct independent of this fixture's
- * bug — see `validEphemeralBytes` below.
+ * The golden ephemeral fixture carries the real `EventHeader` wire shape:
+ * producer coordinates and metadata without an event-envelope `type` or `v`.
+ * Parsing it successfully guards the schema mirror, validator, and SSE parser
+ * boundary together.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -56,7 +28,6 @@ function readFixtureBytes(file: string): Uint8Array {
 }
 
 const enduringBytes = readFixtureBytes("enduring_frame.sse");
-/** The real, currently-vendored golden fixture. See the module comment: this fails ajv validation due to a pre-existing contract bug, unrelated to this parser. */
 const ephemeralFixtureBytes = readFixtureBytes("ephemeral_token_delta.sse");
 
 const enduringExpectedData = {
@@ -73,18 +44,16 @@ const enduringExpectedData = {
   },
 };
 
-/**
- * A hand-built, schema-CONFORMANT `ephemeral` frame, used everywhere this
- * suite needs "a real, valid ephemeral frame" for framing/chunk-boundary
- * robustness (as opposed to specifically exercising the header bug
- * documented above). `kind: "input_queued"` legitimately omits both
- * `header` and `delta` per `ephemeral_frame.schema.json` ("delta is absent
- * for input_queued"; `header` is optional in the schema even though a real
- * server always sends one) — so this is valid wire content, not a
- * fabricated shape the real server could never produce.
- */
-const validEphemeralBytes = new TextEncoder().encode('event: ephemeral\ndata: {"v":1,"kind":"input_queued"}\n\n');
-const validEphemeralExpectedData = { v: 1, kind: "input_queued" };
+const ephemeralExpectedData = {
+  v: 1,
+  kind: "token_delta",
+  header: {
+    session_id: "00000000-0000-0000-0000-000000000000",
+    event_id: "00000000-0000-0000-0000-000000000000",
+    created_at: "2026-07-08T12:00:00Z",
+  },
+  delta: { chunk_type: "text", text: "hello" },
+};
 
 /** Runs a full byte buffer through a fresh parser, split into the given chunk sizes (which must sum to buffer.length), and returns every frame produced (feed() results plus finish()'s). */
 function parseChunks(bytes: Uint8Array, chunkBoundaries: number[]): SseFrame[] {
@@ -128,28 +97,9 @@ describe("golden fixtures parsed as a single chunk", () => {
     expect(frames).toEqual([{ type: "enduring", journalSeq: 42, data: enduringExpectedData }]);
   });
 
-  it("KNOWN CONTRACT BUG: ephemeral_token_delta.sse is recognized as an ephemeral frame (no seq) but its payload fails ajv validation, because the fixture's header does not (and per event.Header's real shape, cannot) satisfy event_envelope.schema.json's required type+v — see this file's module comment", () => {
+  it("parses ephemeral_token_delta.sse with a real EventHeader and no journal sequence", () => {
     const frames = parseWhole(ephemeralFixtureBytes);
-    expect(frames).toHaveLength(1);
-    const frame = frames[0]!;
-    expect(frame.type).toBe("error"); // NOT "ephemeral" — this is the bug, not a parser defect
-    const err = (frame as Extract<SseFrame, { type: "error" }>).error;
-    expect(err).toBeInstanceOf(SseFrameError);
-    expect(err.message).toMatch(/schema validation/);
-    expect(err.cause).toMatchObject({
-      name: "ContractValidationError",
-      schemaName: "ephemeral_frame",
-    });
-    // The raw block is still preserved verbatim for diagnostics, proving the
-    // frame was recognized as `event: ephemeral` (and NOT confused with a
-    // different event: type) despite the validation failure.
-    expect(err.raw).toContain("event: ephemeral");
-    expect(err.raw).not.toContain("id:"); // ephemeral frames never carry a journal seq
-  });
-
-  it("a schema-conformant ephemeral frame IS recognized as ephemeral, with no seq, and an ajv-validated payload", () => {
-    const frames = parseWhole(validEphemeralBytes);
-    expect(frames).toEqual([{ type: "ephemeral", data: validEphemeralExpectedData }]);
+    expect(frames).toEqual([{ type: "ephemeral", data: ephemeralExpectedData }]);
     expect(frames[0]).not.toHaveProperty("journalSeq");
   });
 });
@@ -187,7 +137,7 @@ const combined = concatBytes(
   invalidJsonBytes,
   invalidSchemaBytes,
   unrecognizedEventBytes,
-  validEphemeralBytes,
+  ephemeralFixtureBytes,
 );
 
 const referenceFrames = parseWhole(combined);
@@ -206,7 +156,7 @@ describe("combined buffer parsed as a single chunk (reference for chunk-split te
 
   it("the enduring frame and ephemeral frame carry the same validated payloads as the standalone fixtures", () => {
     expect(referenceFrames[0]).toEqual({ type: "enduring", journalSeq: 42, data: enduringExpectedData });
-    expect(referenceFrames[5]).toEqual({ type: "ephemeral", data: validEphemeralExpectedData });
+    expect(referenceFrames[5]).toEqual({ type: "ephemeral", data: ephemeralExpectedData });
   });
 
   it("each error frame carries a distinguishing message and the raw block text", () => {
@@ -280,7 +230,7 @@ describe("chunk-boundary handling: identical result regardless of how input byte
     }
   });
 
-  it("the buggy real ephemeral fixture also produces an IDENTICAL (error) result regardless of chunking", () => {
+  it("the golden ephemeral fixture produces an identical result regardless of chunking", () => {
     const reference = normalize(parseWhole(ephemeralFixtureBytes));
     for (let cut = 0; cut <= ephemeralFixtureBytes.length; cut++) {
       const frames = parseChunks(ephemeralFixtureBytes, cut === 0 ? [0, ephemeralFixtureBytes.length] : [cut, ephemeralFixtureBytes.length]);
@@ -293,12 +243,12 @@ describe("chunk-boundary handling: identical result regardless of how input byte
 
 describe("heartbeat comment lines", () => {
   it("a heartbeat between two real frames doesn't corrupt either and is itself yielded as a heartbeat frame", () => {
-    const buf = concatBytes(enduringBytes, heartbeatBytes, validEphemeralBytes);
+    const buf = concatBytes(enduringBytes, heartbeatBytes, ephemeralFixtureBytes);
     const frames = parseWhole(buf);
     expect(frames).toEqual([
       { type: "enduring", journalSeq: 42, data: enduringExpectedData },
       { type: "heartbeat" },
-      { type: "ephemeral", data: validEphemeralExpectedData },
+      { type: "ephemeral", data: ephemeralExpectedData },
     ]);
   });
 
@@ -341,16 +291,16 @@ describe("malformed frames", () => {
 
   it("a bad frame does not corrupt the parser's internal buffering state: the next good frame after it still parses correctly", () => {
     const parser = new SseFrameParser();
-    const badThenGood = concatBytes(invalidJsonBytes, validEphemeralBytes);
+    const badThenGood = concatBytes(invalidJsonBytes, ephemeralFixtureBytes);
     const frames = parser.feed(badThenGood);
     expect(frames).toEqual([
       expect.objectContaining({ type: "error" }),
-      { type: "ephemeral", data: validEphemeralExpectedData },
+      { type: "ephemeral", data: ephemeralExpectedData },
     ]);
   });
 
   it("a bad frame straddling a chunk boundary still resolves to exactly one error frame, and parsing resumes correctly", () => {
-    const badThenGood = concatBytes(invalidJsonBytes, validEphemeralBytes);
+    const badThenGood = concatBytes(invalidJsonBytes, ephemeralFixtureBytes);
     for (let cut = 1; cut < invalidJsonBytes.length; cut++) {
       const frames = parseChunks(badThenGood, [cut, badThenGood.length]);
       expect(normalize(frames), `split at offset ${cut}`).toEqual([
@@ -360,7 +310,7 @@ describe("malformed frames", () => {
           raw: expect.any(String),
           causeMessage: expect.any(String),
         },
-        { type: "ephemeral", data: validEphemeralExpectedData },
+        { type: "ephemeral", data: ephemeralExpectedData },
       ]);
     }
   });
@@ -404,8 +354,8 @@ describe("bounded buffer growth: an unterminated line exceeding MAX_BUFFERED_LIN
 
     // The parser is not permanently wedged: a well-formed frame fed right
     // after the oversized one still parses correctly.
-    const recovered = [...parser.feed(validEphemeralBytes), ...parser.finish()];
-    expect(recovered).toEqual([{ type: "ephemeral", data: validEphemeralExpectedData }]);
+    const recovered = [...parser.feed(ephemeralFixtureBytes), ...parser.finish()];
+    expect(recovered).toEqual([{ type: "ephemeral", data: ephemeralExpectedData }]);
   });
 
   it("a line comfortably UNDER the cap, split across many small chunks, is parsed correctly and is not affected by the cap", () => {
@@ -487,11 +437,11 @@ describe("finish()", () => {
     // frame can complete, and that a 1-byte-short buffer correctly withholds
     // dispatch until the terminator actually arrives.
     const parser = new SseFrameParser();
-    const withheld = validEphemeralBytes.slice(0, validEphemeralBytes.length - 1);
-    const lastByte = validEphemeralBytes.slice(validEphemeralBytes.length - 1);
+    const withheld = ephemeralFixtureBytes.slice(0, ephemeralFixtureBytes.length - 1);
+    const lastByte = ephemeralFixtureBytes.slice(ephemeralFixtureBytes.length - 1);
     const partial = parser.feed(withheld);
     expect(partial).toEqual([]); // final blank line not yet complete
     const completed = [...parser.feed(lastByte), ...parser.finish()];
-    expect(completed).toEqual([{ type: "ephemeral", data: validEphemeralExpectedData }]);
+    expect(completed).toEqual([{ type: "ephemeral", data: ephemeralExpectedData }]);
   });
 });

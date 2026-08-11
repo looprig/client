@@ -174,7 +174,7 @@ export const ephemeralFrameSchema = {
       ]
     },
     "header": {
-      "$ref": "event_envelope.schema.json"
+      "$ref": "event_header.schema.json"
     },
     "delta": {
       "type": "object",
@@ -339,6 +339,79 @@ export const eventEnvelopeSchema = {
     "created_at": {
       "type": "string",
       "format": "date-time"
+    }
+  }
+} as const satisfies JSONSchema;
+
+/** Mirrors `contract/schema/event_header.schema.json` (title: "EventHeader"). */
+export const eventHeaderSchema = {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/serve/v1/event_header.schema.json",
+  "title": "EventHeader",
+  "description": "The producer-identity struct (event.Header) stamped on every event, as it appears embedded under an ephemeral frame's header key. It is NOT the durable event_envelope shape (no type/v discriminator) -- Header has no such fields. session_id is always set (every event is at least session-scoped); the rest are present only when the producing event is loop/turn/step scoped or otherwise stamps them.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "session_id": {
+      "$ref": "uuid.schema.json"
+    },
+    "loop_id": {
+      "$ref": "uuid.schema.json"
+    },
+    "turn_id": {
+      "$ref": "uuid.schema.json"
+    },
+    "step_id": {
+      "$ref": "uuid.schema.json"
+    },
+    "agent_name": {
+      "type": "string"
+    },
+    "event_id": {
+      "$ref": "uuid.schema.json"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "cause": {
+      "type": "object",
+      "description": "identity.Cause: the causing command/event's coordinates plus command_id, event_id, tool_execution_id, and agency. All fields are omitzero on the wire.",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "uuid.schema.json"
+        },
+        "loop_id": {
+          "$ref": "uuid.schema.json"
+        },
+        "turn_id": {
+          "$ref": "uuid.schema.json"
+        },
+        "step_id": {
+          "$ref": "uuid.schema.json"
+        },
+        "command_id": {
+          "$ref": "uuid.schema.json"
+        },
+        "event_id": {
+          "$ref": "uuid.schema.json"
+        },
+        "tool_execution_id": {
+          "$ref": "uuid.schema.json"
+        },
+        "agency": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "visibility": {
+      "type": "integer",
+      "minimum": 0
     }
   }
 } as const satisfies JSONSchema;
@@ -628,6 +701,7 @@ export const allSchemas = {
   "ephemeral_frame": ephemeralFrameSchema,
   "error_response": errorResponseSchema,
   "event_envelope": eventEnvelopeSchema,
+  "event_header": eventHeaderSchema,
   "event_journal_page": eventJournalPageSchema,
   "gate_accepted_response": gateAcceptedResponseSchema,
   "gate_response_request": gateResponseRequestSchema,

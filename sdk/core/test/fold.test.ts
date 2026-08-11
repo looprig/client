@@ -175,15 +175,11 @@ describe("foldEphemeral: one case per kind", () => {
     const frame = validateEphemeralFrame({
       v: 1,
       kind: "token_delta",
-      // Hand-built, schema-conformant header: event_envelope.schema.json requires
-      // type+v, which the real encoder never sends (the documented sse.ts bug —
-      // see sse.test.ts's module comment) — so, as there, this is a synthetic
-      // but schema-valid header, not something a live server could produce today.
-      header: { type: "TokenDelta", v: 1, session_id: "44444444-4444-4444-4444-444444444444" },
+      header: { session_id: "44444444-4444-4444-4444-444444444444" },
       delta: { chunk_type: "text", text: "hi" },
     });
     const view = expectOk(foldFreshEphemeral(frame));
-    expect(view.content[0]!.header).toEqual({ type: "TokenDelta", v: 1, session_id: "44444444-4444-4444-4444-444444444444" });
+    expect(view.content[0]!.header).toEqual({ session_id: "44444444-4444-4444-4444-444444444444" });
   });
 });
 
