@@ -41,18 +41,16 @@ package bff
 // putting two replicas of this process behind a shared load balancer without
 // sticky routing.
 //
-// Threat model note on ConstantTimeCompare (see verify's doc): this codebase
-// keeps a crypto/subtle.ConstantTimeCompare call in the verification path as a
-// defensive-coding convention, not because it defends against a realistic
-// attack here. Each minted token carries 256 bits of crypto/rand entropy — a
-// timing oracle precise enough to matter would still need on the order of 2^128
-// online queries against a local server to exploit, which is not a real threat
-// this guard needs to design around. The token's entropy is the actual security
-// property; ConstantTimeCompare is free insurance against a hypothetical future
-// where that stops being true, not a load-bearing defense today.
+// Threat model note on comparison timing (see verify's doc): verify checks a
+// submitted token via a plain map lookup, not a constant-time comparison.
+// This is a deliberate choice, not an oversight: each minted token carries
+// 256 bits of crypto/rand entropy, so a timing oracle precise enough to
+// matter would still need on the order of 2^128 online queries against a
+// local server to exploit — not a real threat this guard needs to design
+// around. The token's entropy is the actual security property here, not
+// comparison timing.
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -210,22 +208,20 @@ func (g *CSRFGuard) Wrap(next http.Handler) http.Handler {
 // (expired entries, over-cap entries) happens only inside Mint
 // (evictExpiredLocked/evictOldestLocked); verify only ever inspects the one
 // entry the submitted token names, never the rest of the map.
+//
+// The map lookup above is the only equality check this function performs.
+// It is not a timing side channel worth defending against here: the real
+// security property is the minted token's 256 bits of crypto/rand entropy
+// (see the package doc's threat-model note), not comparison timing. A
+// future refactor that compares untrusted candidate bytes against a secret
+// some other way (not via this map's own hashing) would need its own
+// constant-time check at that point — it would not inherit one from here.
 func (g *CSRFGuard) verify(token string) bool {
 	g.mu.Lock()
 	mintedAt, ok := g.tokens[token]
 	g.mu.Unlock()
 
 	if !ok {
-		return false
-	}
-	// The map lookup above already resolved equality (that is exactly what
-	// ok == true means): this call is necessarily comparing token against
-	// itself and can never itself fail. See the package doc's threat-model
-	// note — it costs nothing to keep as a defensive-coding convention,
-	// against a future refactor that starts comparing untrusted candidate
-	// tokens some other way, not because it changes this function's actual
-	// security posture today.
-	if subtle.ConstantTimeCompare([]byte(token), []byte(token)) != 1 {
 		return false
 	}
 	return time.Since(mintedAt) <= g.ttl

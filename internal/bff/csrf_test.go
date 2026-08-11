@@ -237,10 +237,9 @@ func TestCSRFGuardWrap(t *testing.T) {
 	}
 
 	// A wrong token the same length as a real one, differing only in its last
-	// character. If verification ever regressed to a naive prefix-timing-leaky
-	// scheme this is exactly the case that would behave differently from a
-	// wrong token of a totally different shape — with ConstantTimeCompare both
-	// must be rejected identically.
+	// character. It must be rejected exactly like a wrong token of a totally
+	// different shape: verify does a plain map lookup keyed by the whole
+	// token, so a near-miss is just another unknown key, not a partial match.
 	nearMiss := valid[:len(valid)-1] + flipLastChar(valid)
 
 	tests := []struct {
