@@ -13,6 +13,7 @@
  */
 import type { FromSchema } from "json-schema-to-ts";
 import {
+  bffErrorResponseSchema,
   capabilitiesSchema,
   createRequestSchema,
   createResponseSchema,
@@ -80,6 +81,15 @@ export type EphemeralFrame = FromSchema<
 
 /** `contract/schema/error_response.schema.json` — no refs. */
 export type ErrorResponse = FromSchema<typeof errorResponseSchema>;
+
+/**
+ * looprig/client's own bffErrorResponseSchema (schema.ts) — NOT vendored, no
+ * refs. Structurally a superset of ErrorResponse (same shape, wider `code`
+ * union), so any ErrorResponse value is assignable to BFFErrorResponse. See
+ * schema.ts's module comment on bffErrorResponseSchema for the full
+ * rationale.
+ */
+export type BFFErrorResponse = FromSchema<typeof bffErrorResponseSchema>;
 
 /** `contract/schema/event_journal_page.schema.json` — refs StatusEvent (-> EventEnvelope -> UUID). */
 export type EventJournalPage = FromSchema<

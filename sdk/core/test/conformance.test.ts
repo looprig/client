@@ -43,8 +43,40 @@ function readFixture(file: string): unknown {
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 
+/**
+ * Suffix every CSRF token-minting request BFFTransport issues ends in,
+ * regardless of `baseUrl` (see transport.ts's `CSRF_TOKEN_PATH`).
+ * ServeTransport never issues one at all (its `controlHeaders` stays the
+ * base no-op — no CSRF concept, it bypasses the BFF entirely), so this
+ * interception is a genuine no-op for every ServeTransport case in this
+ * shared suite.
+ */
+const CSRF_TOKEN_SUFFIX = "/csrf-token";
+
+/**
+ * Wraps handler so ANY GET request ending in CSRF_TOKEN_SUFFIX is answered
+ * with a freshly minted token, transparently, before handler ever sees it —
+ * mirroring internal/bff/csrf.go's TokenHandler closely enough for this
+ * suite's purposes (a real, distinct-each-time string; this suite's fixture
+ * servers don't need to VERIFY the token, only mint one BFFTransport can
+ * cache/echo). Every control-plane test in this file goes through this
+ * wrapper so it doesn't have to know or care that BFFTransport now fetches a
+ * token before its first control request.
+ */
+function withCSRFTokenEndpoint(handler: Handler): Handler {
+  let mintCount = 0;
+  return (req, res) => {
+    if (req.method === "GET" && req.url !== undefined && req.url.endsWith(CSRF_TOKEN_SUFFIX)) {
+      mintCount += 1;
+      sendJSON(res, 200, { csrf_token: `conformance-test-csrf-token-${mintCount}` });
+      return;
+    }
+    handler(req, res);
+  };
+}
+
 async function startServer(handler: Handler): Promise<{ baseUrl: string; server: Server }> {
-  const server = createServer(handler);
+  const server = createServer(withCSRFTokenEndpoint(handler));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (address === null || typeof address === "string") {

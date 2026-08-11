@@ -12,17 +12,19 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  CSRFRejectedError,
   errorFromResponse,
   GateCapacityError,
   IdempotencyConflictError,
   InternalServerError,
   InvalidBodyError,
   LooprigError,
+  OriginNotAllowedError,
   SessionNotFoundError,
   UnknownLooprigError,
 } from "../src/errors.js";
-import { validateErrorResponse } from "../src/validate.js";
-import type { ErrorResponse } from "../src/types.js";
+import { validateBFFErrorResponse, validateErrorResponse } from "../src/validate.js";
+import type { BFFErrorResponse, ErrorResponse } from "../src/types.js";
 
 const fixtureDir = fileURLToPath(new URL("../../../contract/fixtures/", import.meta.url));
 
@@ -68,6 +70,48 @@ describe("errorFromResponse maps fixture-backed codes to dedicated subclasses", 
       expect(err.name).toBe(ctor.name);
     });
   }
+});
+
+describe("errorFromResponse maps the two BFF-local codes to dedicated, mutually-distinguishable subclasses", () => {
+  // These two codes have no contract/fixtures/ counterpart (they're
+  // internal/bff-local — see schema.ts's bffErrorResponseSchema doc — never
+  // emitted by serve), so this constructs BFFErrorResponse values by hand
+  // and validates them through validateBFFErrorResponse (the wider
+  // validator BFFTransport's request plumbing actually uses), rather than
+  // reading a fixture file the way the fixture-backed cases above do.
+  it("csrf_invalid produces a CSRFRejectedError with retryable: true", () => {
+    const raw = { error: { code: "csrf_invalid", message: "missing or invalid CSRF token", retryable: true } };
+    const body: BFFErrorResponse = validateBFFErrorResponse(raw);
+
+    const err = errorFromResponse(403, body);
+
+    expect(err).toBeInstanceOf(CSRFRejectedError);
+    expect(err).toBeInstanceOf(LooprigError);
+    expect(err).not.toBeInstanceOf(OriginNotAllowedError);
+    expect(err.code).toBe("csrf_invalid");
+    expect(err.retryable).toBe(true);
+    expect(err.status).toBe(403);
+  });
+
+  it("origin_not_allowed produces an OriginNotAllowedError with retryable: false", () => {
+    const raw = { error: { code: "origin_not_allowed", message: "origin not allowed", retryable: false } };
+    const body: BFFErrorResponse = validateBFFErrorResponse(raw);
+
+    const err = errorFromResponse(403, body);
+
+    expect(err).toBeInstanceOf(OriginNotAllowedError);
+    expect(err).toBeInstanceOf(LooprigError);
+    expect(err).not.toBeInstanceOf(CSRFRejectedError);
+    expect(err.code).toBe("origin_not_allowed");
+    expect(err.retryable).toBe(false);
+    expect(err.status).toBe(403);
+  });
+
+  it("validateBFFErrorResponse rejects a code neither serve nor the BFF's own middleware ever emits", () => {
+    expect(() =>
+      validateBFFErrorResponse({ error: { code: "not_a_real_code", message: "x", retryable: false } }),
+    ).toThrow();
+  });
 });
 
 describe("errorFromResponse forward compatibility", () => {

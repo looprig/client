@@ -34,21 +34,38 @@
  *
  * Every response body is parsed through the ajv validators from validate.ts
  * before being returned — never cast with `as` — and every non-2xx response
- * is decoded as a (validated) ErrorResponse and turned into the matching
+ * is decoded as a (validated) BFFErrorResponse and turned into the matching
  * typed error from errors.ts. Both implementations share this discipline by
- * construction: they share the same private request plumbing, not just the
- * same intent independently reimplemented.
+ * construction: they share the same protected/private request plumbing, not
+ * just the same intent independently reimplemented.
+ *
+ * CSRF (control-plane only): BFFTransport sits behind internal/bff's
+ * HostOriginGuard AND CSRFGuard (guard.go, csrf.go) — every control-plane
+ * (POST) request must carry a valid `X-CSRF-Token` header, obtained from
+ * `GET /api/v1/csrf-token` (csrf.go's TokenHandler). BFFTransport fetches
+ * that token lazily (on the FIRST control request, never eagerly at
+ * construction — `createBFFClient()` is used as a synchronous Svelte prop
+ * default, see app/src/routes/sessions/+page.svelte), caches it in memory
+ * (never a cookie — see csrf.go's package doc on why an independent,
+ * header-carried token is the whole point), shares one in-flight mint
+ * promise across concurrent callers, and retries a `CSRFRejectedError`
+ * exactly once (clear the cached token, re-mint, replay the identical
+ * request) — see `HttpTransport.postJSON`'s CSRF-retry hook and
+ * `BFFTransport.controlHeaders`/`beforeCSRFRetry` below. ServeTransport talks
+ * directly to `pkg/serve`, bypassing the BFF (and CSRF) entirely, so its
+ * `controlHeaders` stays the base no-op.
  */
 import {
+  CSRFRejectedError,
   errorFromResponse,
   MalformedResponseError,
   NetworkError,
   RequestAbortedError,
 } from "./errors.js";
 import type {
+  BFFErrorResponse,
   CreateRequest,
   CreateResponse,
-  ErrorResponse,
   EventJournalPage,
   GateAcceptedResponse,
   GateResponseRequest,
@@ -59,8 +76,8 @@ import type {
   SessionStatus,
 } from "./types.js";
 import {
+  validateBFFErrorResponse,
   validateCreateResponse,
-  validateErrorResponse,
   validateEventJournalPage,
   validateGateAcceptedResponse,
   validateInputResponse,
@@ -69,6 +86,71 @@ import {
   validateSessionList,
   validateSessionStatus,
 } from "./validate.js";
+
+/**
+ * The request header BFFTransport echoes a minted CSRF token back in on
+ * every control-plane request. MUST match internal/bff/csrf.go's
+ * `CSRFHeaderName` exactly — there is no runtime cross-check between the two
+ * repos' constants, so a mismatch here would silently make every control
+ * request fail CSRF verification.
+ */
+const CSRF_TOKEN_HEADER = "X-CSRF-Token";
+
+/**
+ * Path (relative to BFFTransport's own `baseUrl`) BFFTransport fetches a
+ * fresh CSRF token from. MUST match internal/bff/mux.go's registered
+ * `GET /api/v1/csrf-token` route: with the default `baseUrl` ("/api/v1"),
+ * `${baseUrl}${CSRF_TOKEN_PATH}` resolves to exactly that path.
+ */
+const CSRF_TOKEN_PATH = "/csrf-token";
+
+/** The shape csrf.go's TokenHandler writes: `{"csrf_token": "..."}`. */
+interface CSRFTokenResponse {
+  csrf_token: string;
+}
+
+function isCSRFTokenResponse(data: unknown): data is CSRFTokenResponse {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "csrf_token" in data &&
+    typeof (data as { csrf_token: unknown }).csrf_token === "string"
+  );
+}
+
+/**
+ * Wraps `promise` so the RETURNED promise also rejects with
+ * `RequestAbortedError` if `signal` fires before `promise` itself settles —
+ * WITHOUT cancelling `promise`. Used for BFFTransport's shared, cross-caller
+ * CSRF mint: one caller aborting its own request must not cancel the
+ * in-flight mint fetch for OTHER concurrent callers also awaiting it. If
+ * `signal` is already aborted, rejects immediately without ever touching
+ * `promise`.
+ */
+function abortableWait<T>(promise: Promise<T>, signal: AbortSignal | undefined, path: string): Promise<T> {
+  if (signal === undefined) {
+    return promise;
+  }
+  if (signal.aborted) {
+    return Promise.reject(new RequestAbortedError(path));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(new RequestAbortedError(path));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
 
 /** Common options every transport method accepts. */
 export interface RequestOptions {
@@ -217,6 +299,40 @@ abstract class HttpTransport implements LooprigTransport {
     return {};
   }
 
+  /**
+   * Extra headers attached ONLY to control-plane (POST) requests, computed
+   * fresh (and awaited) on every such request — NEVER on the read-plane
+   * GETs above (`listSessions`/`readStatus`/`readHistory` never call this).
+   * The base implementation returns none, matching `ServeTransport` (no CSRF
+   * concept — it talks directly to serve, bypassing the BFF's CSRFGuard
+   * entirely) and keeping this a genuine no-op until `BFFTransport` overrides
+   * it. `path` is the request's own path (for a precise
+   * `RequestAbortedError` if `signal` is already aborted); `signal` is the
+   * caller's own abort signal for this one request.
+   */
+  protected async controlHeaders(_path: string, _signal?: AbortSignal): Promise<Record<string, string>> {
+    return {};
+  }
+
+  /**
+   * Whether `postJSON` should retry a control request exactly once after a
+   * `CSRFRejectedError`. Base: false (no CSRF concept to recover from).
+   * `BFFTransport` overrides this to true.
+   */
+  protected retriesOnCSRFRejection(): boolean {
+    return false;
+  }
+
+  /**
+   * Called once, right before `postJSON`'s single retry attempt, so a
+   * subclass can invalidate whatever made `controlHeaders` return a now-
+   * rejected value (e.g. clear a stale cached CSRF token so the retry's own
+   * `controlHeaders` call re-mints). Base: no-op.
+   */
+  protected async beforeCSRFRetry(): Promise<void> {
+    // no-op in the base class
+  }
+
   async listSessions(options: ListSessionsOptions = {}): Promise<SessionList> {
     const params = new URLSearchParams();
     if (options.skip !== undefined) params.set("skip", String(options.skip));
@@ -252,7 +368,26 @@ abstract class HttpTransport implements LooprigTransport {
     // identically for an idle create (createRequestSchema's "blocks" is
     // optional) — always sending SOME JSON body keeps this method's wire
     // behavior uniform regardless of whether the caller passed anything.
-    const data = await this.postJSON("/sessions", request ?? {}, options.signal, requestHeaders);
+    //
+    // onBeforeCSRFRetry (5th arg): if the caller never supplied an
+    // idempotencyKey, the ORIGINAL attempt goes out with none — unchanged
+    // default behavior for the (overwhelmingly common) non-retried case,
+    // matching CreateSessionOptions's own "fresh key per call defeats the
+    // purpose" doc: nothing should mint one it doesn't need to. Only if a
+    // CSRF retry actually becomes necessary does this generate one, mutating
+    // requestHeaders IN PLACE before postJSON's single retry re-reads it —
+    // so the retry (the only second attempt that can ever happen; capped at
+    // one) carries a durable Idempotency-Key even though the original
+    // attempt didn't. This is still safe: the original attempt was rejected
+    // by CSRFGuard BEFORE ever reaching serve (see internal/bff/csrf.go's
+    // Wrap — a rejected request never reaches next), so it created zero
+    // sessions; there is no "first" session the retry's key could collide
+    // or race with.
+    const data = await this.postJSON("/sessions", request ?? {}, options.signal, requestHeaders, () => {
+      if (requestHeaders[IDEMPOTENCY_KEY_HEADER] === undefined) {
+        requestHeaders[IDEMPOTENCY_KEY_HEADER] = generateIdempotencyKey();
+      }
+    });
     return validateCreateResponse(data);
   }
 
@@ -298,22 +433,50 @@ abstract class HttpTransport implements LooprigTransport {
    * JSON-serialized and sent with `Content-Type: application/json`; `body`
    * omitted (`undefined`) sends no request body at all (used by
    * `restoreSession`/`interrupt`, whose handlers never read one).
-   * `requestHeaders` are merged on top of `extraHeaders()` (e.g.
-   * `createSession`'s `Idempotency-Key`).
+   * `requestHeaders` are merged on top of `extraHeaders()` and this
+   * request's `controlHeaders()` (e.g. `createSession`'s `Idempotency-Key`
+   * and, for `BFFTransport`, the CSRF token).
+   *
+   * CSRF retry: if the attempt throws `CSRFRejectedError` and
+   * `retriesOnCSRFRejection()` says so, `beforeCSRFRetry()` runs (letting a
+   * subclass invalidate whatever made `controlHeaders()` stale), then
+   * `onBeforeCSRFRetry` runs (letting THIS CALL's caller — e.g.
+   * `createSession` — adjust `requestHeaders` in place before the retry
+   * re-reads it), then the identical request is sent exactly once more. Any
+   * error from that second attempt (including a second `CSRFRejectedError`)
+   * propagates uncaught: this is a single retry, never a loop.
+   * `requestHeaders` is read FRESH inside the retry (not snapshotted before
+   * the first attempt), so a mutation `onBeforeCSRFRetry` makes is visible
+   * to it.
    */
   private async postJSON(
     path: string,
     body: unknown | undefined,
     signal?: AbortSignal,
     requestHeaders: Record<string, string> = {},
+    onBeforeCSRFRetry?: () => void,
   ): Promise<unknown> {
-    const headers: Record<string, string> = { ...this.extraHeaders(), ...requestHeaders };
-    let serializedBody: string | undefined;
-    if (body !== undefined) {
-      headers["Content-Type"] = "application/json";
-      serializedBody = JSON.stringify(body);
+    const serializedBody = body !== undefined ? JSON.stringify(body) : undefined;
+
+    const attempt = async (): Promise<unknown> => {
+      const control = await this.controlHeaders(path, signal);
+      const headers: Record<string, string> = { ...this.extraHeaders(), ...requestHeaders, ...control };
+      if (body !== undefined) {
+        headers["Content-Type"] = "application/json";
+      }
+      return this.sendRequest(path, { method: "POST", body: serializedBody, signal, headers });
+    };
+
+    try {
+      return await attempt();
+    } catch (err) {
+      if (err instanceof CSRFRejectedError && this.retriesOnCSRFRejection()) {
+        await this.beforeCSRFRetry();
+        onBeforeCSRFRetry?.();
+        return await attempt();
+      }
+      throw err;
     }
-    return this.sendRequest(path, { method: "POST", body: serializedBody, signal, headers });
   }
 
   /**
@@ -323,9 +486,11 @@ abstract class HttpTransport implements LooprigTransport {
    * typed error matching a non-2xx response. This is the one place fetch()
    * itself is called; every public method funnels through it (via getJSON/
    * postJSON) so abort/network handling is implemented exactly once, shared
-   * by every LooprigTransport implementation in this module.
+   * by every LooprigTransport implementation in this module. Protected
+   * (not private): BFFTransport also calls this directly to fetch/decode its
+   * CSRF token (a request with no schema-validated DTO of its own).
    */
-  private async sendRequest(
+  protected async sendRequest(
     path: string,
     init: { method: "GET" | "POST"; body?: string; signal?: AbortSignal; headers?: Record<string, string> },
   ): Promise<unknown> {
@@ -357,19 +522,27 @@ abstract class HttpTransport implements LooprigTransport {
     }
 
     if (!response.ok) {
-      let errorBody: ErrorResponse;
+      let errorBody: BFFErrorResponse;
       try {
-        errorBody = validateErrorResponse(responseBody);
+        // validateBFFErrorResponse (not the narrower validateErrorResponse):
+        // this shared plumbing serves BOTH transports, and BFFTransport can
+        // genuinely observe the two BFF-local codes (csrf_invalid,
+        // origin_not_allowed) on top of every code serve itself emits — see
+        // schema.ts's bffErrorResponseSchema doc. Strictly wider acceptance
+        // than validateErrorResponse; ServeTransport (which can never
+        // actually receive either BFF-local code) is unaffected.
+        errorBody = validateBFFErrorResponse(responseBody);
       } catch (cause) {
-        // The response was valid JSON but didn't conform to the BFF's
-        // error_response envelope — e.g. an infrastructure proxy/load
-        // balancer returning its own `{"message": "Bad Gateway"}` shape for
-        // a 502 instead of the BFF ever handling the request. Degrade the
-        // same way a fully non-JSON body already does (MalformedResponseError),
-        // rather than letting ContractValidationError — an implementation
-        // detail of validate.ts, not part of this module's documented
-        // exception surface — leak to callers. The original validation
-        // failure is preserved as `cause` for debugging.
+        // The response was valid JSON but didn't conform to the error
+        // envelope shape — e.g. an infrastructure proxy/load balancer
+        // returning its own `{"message": "Bad Gateway"}` shape for a 502
+        // instead of the BFF (or serve) ever handling the request. Degrade
+        // the same way a fully non-JSON body already does
+        // (MalformedResponseError), rather than letting
+        // ContractValidationError — an implementation detail of validate.ts,
+        // not part of this module's documented exception surface — leak to
+        // callers. The original validation failure is preserved as `cause`
+        // for debugging.
         throw new MalformedResponseError(path, response.status, { cause });
       }
       throw errorFromResponse(response.status, errorBody);
@@ -397,17 +570,104 @@ export interface BFFTransportOptions {
  * `LooprigTransport` implementation for same-origin browser apps: calls
  * `/api/v1/...` paths via `fetch()`. The BFF already sits behind
  * authentication and CSRF/Origin guards (`internal/bff/guard.go`,
- * `csrf.go`) — this transport itself carries no token, matching the plan's
- * "token stays server-side" framing.
+ * `csrf.go`) — this transport itself carries no bearer token (matching the
+ * plan's "token stays server-side" framing) but DOES carry a CSRF token: see
+ * this file's module doc and `controlHeaders`/`beforeCSRFRetry` below.
  */
 export class BFFTransport extends HttpTransport {
   protected readonly baseUrl: string;
   protected readonly fetchImpl: FetchLike;
 
+  /**
+   * In-memory CSRF token cache — deliberately NOT a cookie (see csrf.go's
+   * package doc on why an independent, header-carried token is the whole
+   * point of this guard). `undefined` means "no live token cached"; cleared
+   * by `beforeCSRFRetry` on a `CSRFRejectedError` so the next
+   * `controlHeaders` call re-mints.
+   */
+  private cachedCSRFToken: string | undefined;
+
+  /**
+   * The in-flight mint fetch, shared across every concurrent caller that
+   * observes `cachedCSRFToken === undefined` before it resolves — so N
+   * simultaneous control requests trigger exactly ONE `GET /api/v1/csrf-token`,
+   * not N. Cleared (via `.finally`) as soon as it settles, success or
+   * failure, so a later call starts a fresh mint rather than replaying a
+   * stale settled promise forever.
+   */
+  private csrfMintPromise: Promise<string> | undefined;
+
   constructor(options: BFFTransportOptions = {}) {
     super();
     this.baseUrl = options.baseUrl ?? "/api/v1";
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    // Deliberately NO eager mint here: createBFFClient() is used as a
+    // synchronous Svelte prop default (see app/src/routes/sessions/
+    // +page.svelte and [sid]/+page.svelte), and a browse-only deployment
+    // (internal/bff's NewBrowseOnlyMux — no control routes, no CSRF token
+    // endpoint at all) must never see a wasted GET /api/v1/csrf-token that
+    // would just 404. The token is fetched lazily, on the first control
+    // request that actually needs it (see controlHeaders below).
+  }
+
+  protected override retriesOnCSRFRejection(): boolean {
+    return true;
+  }
+
+  protected override async beforeCSRFRetry(): Promise<void> {
+    this.cachedCSRFToken = undefined;
+  }
+
+  protected override async controlHeaders(path: string, signal?: AbortSignal): Promise<Record<string, string>> {
+    const token = await abortableWait(this.getOrMintCSRFToken(), signal, path);
+    return { [CSRF_TOKEN_HEADER]: token };
+  }
+
+  /**
+   * Returns the cached token if one is live, otherwise joins (or starts) the
+   * shared in-flight mint. This is the ONE seam concurrent callers and the
+   * cache-hit fast path both funnel through.
+   */
+  private getOrMintCSRFToken(): Promise<string> {
+    if (this.cachedCSRFToken !== undefined) {
+      return Promise.resolve(this.cachedCSRFToken);
+    }
+    if (this.csrfMintPromise === undefined) {
+      this.csrfMintPromise = this.mintCSRFToken().finally(() => {
+        this.csrfMintPromise = undefined;
+      });
+      // Guard against an unhandled rejection when every caller that started
+      // (or joined) this mint ends up NOT actually awaiting its outcome —
+      // e.g. abortableWait's caller aborted before this settled, and no
+      // other concurrent caller was sharing it. This harmless no-op catch is
+      // attached to the SAME promise object callers receive from the
+      // `return this.csrfMintPromise` below; it does not swallow the error
+      // for a caller that DOES await it — `.then`/`.catch` on a promise
+      // fires independently for every call site that attaches one, so real
+      // callers still see the real rejection via their own awaited
+      // reference.
+      this.csrfMintPromise.catch(() => {
+        // Intentionally empty: see comment above.
+      });
+    }
+    return this.csrfMintPromise;
+  }
+
+  /**
+   * Issues the actual `GET /api/v1/csrf-token` request via the shared
+   * `sendRequest` plumbing (so abort/network/error-envelope handling is the
+   * SAME code path every other request in this module uses — a rebound Host
+   * hitting this route, for instance, correctly surfaces as
+   * `OriginNotAllowedError`, not a bespoke failure mode), caches the result,
+   * and returns it.
+   */
+  private async mintCSRFToken(): Promise<string> {
+    const data = await this.sendRequest(CSRF_TOKEN_PATH, { method: "GET" });
+    if (!isCSRFTokenResponse(data)) {
+      throw new MalformedResponseError(CSRF_TOKEN_PATH, 200);
+    }
+    this.cachedCSRFToken = data.csrf_token;
+    return data.csrf_token;
   }
 }
 

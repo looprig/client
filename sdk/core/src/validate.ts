@@ -15,8 +15,9 @@
  */
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { ErrorObject, ValidateFunction } from "ajv";
-import { allSchemas } from "./schema.js";
+import { allSchemas, bffErrorResponseSchema } from "./schema.js";
 import type {
+  BFFErrorResponse,
   Capabilities,
   CreateRequest,
   CreateResponse,
@@ -100,6 +101,18 @@ const validators = Object.fromEntries(
   schemaNames.map((name) => [name, ajv.compile(allSchemas[name])]),
 ) as { [K in SchemaName]: ValidateFunction };
 
+/**
+ * Compiled separately from the `validators` map above: bffErrorResponseSchema
+ * is deliberately NOT part of `allSchemas` (see its own doc in schema.ts —
+ * it has no vendored counterpart under `contract/schema/` for the drift
+ * guard to compare against), so it isn't looped over by `schemaNames`. It's
+ * still compiled against the SAME `ajv` instance (its `$id` doesn't collide
+ * with anything in `allSchemas`), so BFFTransport's error decoding shares
+ * the same ajv configuration (draft-2020, the same date-time format) as
+ * every other validator in this module.
+ */
+const bffErrorResponseValidator = ajv.compile(bffErrorResponseSchema);
+
 /** Thrown by validate() when data fails schema conformance. Carries ajv's raw ErrorObjects for programmatic inspection alongside a human-readable message. */
 export class ContractValidationError extends Error {
   readonly schemaName: SchemaName;
@@ -136,6 +149,26 @@ export const validateCreateResponse = (data: unknown): CreateResponse => validat
 export const validateEnduringFrame = (data: unknown): EnduringFrame => validate("enduring_frame", data);
 export const validateEphemeralFrame = (data: unknown): EphemeralFrame => validate("ephemeral_frame", data);
 export const validateErrorResponse = (data: unknown): ErrorResponse => validate("error_response", data);
+
+/**
+ * Validates `data` against bffErrorResponseSchema (schema.ts) — the SAME
+ * envelope shape validateErrorResponse checks, but accepting the two
+ * additional BFF-local codes (csrf_invalid, origin_not_allowed) alongside
+ * every code the vendored schema already lists. Used by BFFTransport's
+ * request plumbing (transport.ts) in place of validateErrorResponse, since
+ * BFFTransport — unlike ServeTransport — can genuinely observe either kind
+ * of error. Not part of the `validate()`/`SchemaTypeMap` machinery above
+ * (bffErrorResponseSchema is deliberately excluded from `allSchemas`; see its
+ * schema.ts doc), so this wraps `bffErrorResponseValidator` directly rather
+ * than going through `validate("error_response", data)`, which would reject
+ * either new code as `additionalProperties`/`enum` violations.
+ */
+export function validateBFFErrorResponse(data: unknown): BFFErrorResponse {
+  if (!bffErrorResponseValidator(data)) {
+    throw new ContractValidationError("error_response", bffErrorResponseValidator.errors);
+  }
+  return data as BFFErrorResponse;
+}
 export const validateEventEnvelope = (data: unknown): EventEnvelope => validate("event_envelope", data);
 export const validateEventJournalPage = (data: unknown): EventJournalPage => validate("event_journal_page", data);
 export const validateGateAcceptedResponse = (data: unknown): GateAcceptedResponse => validate("gate_accepted_response", data);

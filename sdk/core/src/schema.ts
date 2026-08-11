@@ -231,6 +231,77 @@ export const errorResponseSchema = {
   }
 } as const satisfies JSONSchema;
 
+/**
+ * looprig/client's OWN error envelope schema — NOT vendored from harness (see
+ * this file's module comment above for why every OTHER schema here mirrors a
+ * `contract/schema/*.schema.json` file; this one deliberately does not, and
+ * has no counterpart under `contract/schema/`). It shares the exact wire
+ * SHAPE serve's `error_response.schema.json` declares (nested
+ * `{"error":{code,message,retryable}}`), but with a WIDER `code` enum: every
+ * code the vendored schema lists, PLUS `"csrf_invalid"` and
+ * `"origin_not_allowed"` — the two codes `internal/bff/guard.go` and
+ * `internal/bff/csrf.go` mint locally when THEY reject a request, before it
+ * ever reaches serve (see those two files' doc comments, and errors.go's).
+ *
+ * BFFTransport (transport.ts) is the only client that can ever observe these
+ * two codes — ServeTransport talks directly to serve, bypassing the BFF's
+ * own middleware entirely — so BFFTransport's request plumbing validates
+ * every non-2xx body against THIS schema, not the narrower vendored
+ * `errorResponseSchema` above. This schema is intentionally excluded from
+ * `allSchemas` below: the drift-guard test (`test/contract.test.ts`) asserts
+ * `allSchemas`'s keys exactly match `contract/schema/`'s files, and this
+ * schema has no vendored file to match (there being nothing on harness's
+ * side to drift from — it never emits these codes).
+ */
+export const bffErrorResponseSchema = {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/client/v1/bff_error_response.schema.json",
+  "title": "BFFErrorResponse",
+  "description": "looprig/client's own superset of serve's error_response.schema.json: same nested {\"error\":{code,message,retryable}} shape, but the code enum additionally covers the BFF-local rejection codes internal/bff/guard.go and internal/bff/csrf.go mint before a request ever reaches serve.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "error"
+  ],
+  "properties": {
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Stable machine-readable code a client can switch on. Every code serve's own error_response.schema.json enumerates, plus the two BFF-local codes csrf_invalid and origin_not_allowed.",
+          "enum": [
+            "internal",
+            "invalid_body",
+            "invalid_parameter",
+            "session_not_found",
+            "idempotency_conflict",
+            "gate_not_found",
+            "gate_action_invalid",
+            "gate_kind_mismatch",
+            "gate_not_ready",
+            "gate_capacity",
+            "csrf_invalid",
+            "origin_not_allowed"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+} as const satisfies JSONSchema;
+
 /** Mirrors `contract/schema/event_envelope.schema.json` (title: "EventEnvelope"). */
 export const eventEnvelopeSchema = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",

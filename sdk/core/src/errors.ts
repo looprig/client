@@ -18,25 +18,37 @@
  * UnknownLooprigError, which still carries the real `code` string untyped so a
  * caller can still branch on it, just without a dedicated class.
  */
-import type { ErrorResponse } from "./types.js";
+import type { BFFErrorResponse, ErrorResponse } from "./types.js";
 
-/** The `error.code` field's type, derived from the same schema every other DTO is. */
-export type ErrorCode = ErrorResponse["error"]["code"];
+/**
+ * The `error.code` field's type. Widened beyond `ErrorResponse["error"]["code"]`
+ * (the vendored serve schema's enum) to also cover the two BFF-local codes
+ * `internal/bff/guard.go` and `internal/bff/csrf.go` mint before a request
+ * ever reaches serve — see `schema.ts`'s `bffErrorResponseSchema` doc.
+ * ServeTransport (which talks directly to serve, bypassing the BFF) can
+ * never actually observe either of these two; only BFFTransport can.
+ */
+export type ErrorCode = ErrorResponse["error"]["code"] | "csrf_invalid" | "origin_not_allowed";
 
 /**
  * Base class for every typed error derived from a server-sent error envelope.
  * Carries the fields a caller needs to react programmatically: `code` (switch
  * on this, not `message`), `retryable` (whether the identical request may be
  * retried as-is), `status` (the HTTP status actually observed), and `body`
- * (the full validated envelope, for callers that want more).
+ * (the full validated envelope, for callers that want more). `body` is typed
+ * `BFFErrorResponse` (the wider, client-owned shape) rather than the
+ * narrower vendored `ErrorResponse`, since any subclass here — including the
+ * two BFF-local ones below — may need to carry one; `ErrorResponse` is
+ * structurally assignable to `BFFErrorResponse`, so every existing call site
+ * passing a validated `ErrorResponse` still type-checks unchanged.
  */
 export abstract class LooprigError extends Error {
   abstract readonly code: ErrorCode;
   readonly retryable: boolean;
   readonly status: number;
-  readonly body: ErrorResponse;
+  readonly body: BFFErrorResponse;
 
-  protected constructor(status: number, body: ErrorResponse) {
+  protected constructor(status: number, body: BFFErrorResponse) {
     super(body.error.message);
     this.status = status;
     this.retryable = body.error.retryable;
@@ -51,7 +63,7 @@ export abstract class LooprigError extends Error {
 /** 400: the request body failed server-side validation. */
 export class InvalidBodyError extends LooprigError {
   readonly code = "invalid_body" as const;
-  constructor(status: number, body: ErrorResponse) {
+  constructor(status: number, body: BFFErrorResponse) {
     super(status, body);
   }
 }
@@ -59,7 +71,7 @@ export class InvalidBodyError extends LooprigError {
 /** 404: no session exists for the requested id. */
 export class SessionNotFoundError extends LooprigError {
   readonly code = "session_not_found" as const;
-  constructor(status: number, body: ErrorResponse) {
+  constructor(status: number, body: BFFErrorResponse) {
     super(status, body);
   }
 }
@@ -67,7 +79,7 @@ export class SessionNotFoundError extends LooprigError {
 /** 409: an idempotency key was reused with a different request body. */
 export class IdempotencyConflictError extends LooprigError {
   readonly code = "idempotency_conflict" as const;
-  constructor(status: number, body: ErrorResponse) {
+  constructor(status: number, body: BFFErrorResponse) {
     super(status, body);
   }
 }
@@ -75,7 +87,7 @@ export class IdempotencyConflictError extends LooprigError {
 /** 500: an unclassified server-side failure. */
 export class InternalServerError extends LooprigError {
   readonly code = "internal" as const;
-  constructor(status: number, body: ErrorResponse) {
+  constructor(status: number, body: BFFErrorResponse) {
     super(status, body);
   }
 }
@@ -83,7 +95,41 @@ export class InternalServerError extends LooprigError {
 /** 503: the gate subsystem is at capacity; retryable per the envelope. */
 export class GateCapacityError extends LooprigError {
   readonly code = "gate_capacity" as const;
-  constructor(status: number, body: ErrorResponse) {
+  constructor(status: number, body: BFFErrorResponse) {
+    super(status, body);
+  }
+}
+
+/**
+ * 403, BFF-local: `internal/bff/csrf.go`'s `CSRFGuard.Wrap` rejected a
+ * control-plane request for a missing, unknown, or expired CSRF token —
+ * `retryable: true` on the wire (see csrf.go's Wrap doc), meaning the
+ * recovery path (clear the cached token, mint a fresh one, retry the
+ * identical request once) is expected and safe. `BFFTransport`'s request
+ * plumbing (transport.ts) does exactly that automatically; a caller using
+ * this class directly should follow the same one-retry-then-give-up
+ * discipline rather than looping.
+ */
+export class CSRFRejectedError extends LooprigError {
+  readonly code = "csrf_invalid" as const;
+  constructor(status: number, body: BFFErrorResponse) {
+    super(status, body);
+  }
+}
+
+/**
+ * 403, BFF-local: `internal/bff/guard.go`'s `HostOriginGuard.Wrap` rejected a
+ * request because its Host and/or Origin header didn't name an allowed
+ * host, or didn't exactly match this request's own Host (see guard.go's
+ * `originAllowed` doc for the port-exactness fix this maps to).
+ * `retryable: false` on the wire — deliberately distinct from
+ * `CSRFRejectedError`'s `true`: retrying an identical request against the
+ * identical (rejected) origin can never succeed, so a caller (and
+ * `BFFTransport`'s automatic retry logic) must NOT retry on this code.
+ */
+export class OriginNotAllowedError extends LooprigError {
+  readonly code = "origin_not_allowed" as const;
+  constructor(status: number, body: BFFErrorResponse) {
     super(status, body);
   }
 }
@@ -97,21 +143,23 @@ export class GateCapacityError extends LooprigError {
  */
 export class UnknownLooprigError extends LooprigError {
   readonly code: ErrorCode;
-  constructor(status: number, body: ErrorResponse) {
+  constructor(status: number, body: BFFErrorResponse) {
     super(status, body);
     this.code = body.error.code;
   }
 }
 
 /**
- * Parses a decoded, schema-validated `ErrorResponse` (see
- * `validateErrorResponse` in validate.ts — callers MUST validate the raw body
- * before calling this; it does not re-validate) plus the HTTP status it
- * arrived with into the matching typed error. Exhaustive over the five
- * fixture-backed codes; every other code (known-but-unmodeled or genuinely
- * unknown) maps to UnknownLooprigError rather than throwing.
+ * Parses a decoded, schema-validated `BFFErrorResponse` (see
+ * `validateBFFErrorResponse` in validate.ts for `BFFTransport`'s callers, or
+ * `validateErrorResponse` — a structurally-compatible narrower validator —
+ * for `ServeTransport`'s; callers MUST validate the raw body before calling
+ * this, it does not re-validate) plus the HTTP status it arrived with into
+ * the matching typed error. Exhaustive over the five fixture-backed serve
+ * codes plus the two BFF-local codes; every other code (known-but-unmodeled
+ * or genuinely unknown) maps to UnknownLooprigError rather than throwing.
  */
-export function errorFromResponse(status: number, body: ErrorResponse): LooprigError {
+export function errorFromResponse(status: number, body: BFFErrorResponse): LooprigError {
   switch (body.error.code) {
     case "invalid_body":
       return new InvalidBodyError(status, body);
@@ -123,6 +171,10 @@ export function errorFromResponse(status: number, body: ErrorResponse): LooprigE
       return new InternalServerError(status, body);
     case "gate_capacity":
       return new GateCapacityError(status, body);
+    case "csrf_invalid":
+      return new CSRFRejectedError(status, body);
+    case "origin_not_allowed":
+      return new OriginNotAllowedError(status, body);
     default:
       return new UnknownLooprigError(status, body);
   }

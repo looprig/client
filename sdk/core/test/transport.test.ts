@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { BFFTransport, generateIdempotencyKey } from "../src/transport.js";
 import {
+  CSRFRejectedError,
   GateCapacityError,
   IdempotencyConflictError,
   InternalServerError,
@@ -20,6 +21,7 @@ import {
   LooprigError,
   MalformedResponseError,
   NetworkError,
+  OriginNotAllowedError,
   RequestAbortedError,
   SessionNotFoundError,
 } from "../src/errors.js";
@@ -33,8 +35,46 @@ function readFixture(file: string): unknown {
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void;
 
+/**
+ * Suffix every CSRF token-minting request BFFTransport issues ends in,
+ * regardless of `baseUrl` (see transport.ts's `CSRF_TOKEN_PATH`).
+ */
+const CSRF_TOKEN_SUFFIX = "/csrf-token";
+
+/**
+ * Wraps handler so ANY GET request ending in CSRF_TOKEN_SUFFIX is answered
+ * with a freshly minted token, transparently, before handler ever sees it —
+ * so every control-plane (POST) test below doesn't have to know or care
+ * that BFFTransport now fetches/caches a CSRF token before its first
+ * control request (Fix F). Tests that specifically exercise the CSRF
+ * mint/retry/concurrency behavior itself (see the "BFFTransport CSRF token"
+ * describe block) bypass this wrapper and drive the token endpoint directly.
+ */
+function withCSRFTokenEndpoint(handler: Handler): Handler {
+  let mintCount = 0;
+  return (req, res) => {
+    if (req.method === "GET" && req.url !== undefined && req.url.endsWith(CSRF_TOKEN_SUFFIX)) {
+      mintCount += 1;
+      sendJSON(res, 200, { csrf_token: `transport-test-csrf-token-${mintCount}` });
+      return;
+    }
+    handler(req, res);
+  };
+}
+
 /** Starts a throwaway HTTP server on an ephemeral port running `handler`, returning its base URL and a teardown. */
 async function startServer(handler: Handler): Promise<{ baseUrl: string; server: Server }> {
+  const server = createServer(withCSRFTokenEndpoint(handler));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("expected server to bind a TCP address");
+  }
+  return { baseUrl: `http://127.0.0.1:${address.port}/api/v1`, server };
+}
+
+/** Same as startServer, but WITHOUT the CSRF token endpoint interception — for tests that drive the token endpoint (or its absence) directly. */
+async function startServerRaw(handler: Handler): Promise<{ baseUrl: string; server: Server }> {
   const server = createServer(handler);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -512,5 +552,248 @@ describe("BFFTransport network failure", () => {
     const rejection = transport.createSession();
     await expect(rejection).rejects.toBeInstanceOf(NetworkError);
     await expect(rejection).rejects.not.toBeInstanceOf(RequestAbortedError);
+  });
+});
+
+// These tests drive the CSRF token endpoint (and its interaction with a
+// control request) directly, via startServerRaw — NOT the withCSRFTokenEndpoint
+// auto-mint wrapper every OTHER control-plane test above uses — because they
+// need to control exactly how many times it's hit, what it returns, and in
+// what order relative to the control POST.
+describe("BFFTransport CSRF token", () => {
+  const sid = "00000000-0000-0000-0000-000000000000";
+
+  it("full round trip: mints a token lazily on the first control request, echoes it on X-CSRF-Token, and caches it (no second mint on a later control request)", async () => {
+    let tokenRequests = 0;
+    let firstPostToken: string | undefined;
+    let secondPostToken: string | undefined;
+    let postCount = 0;
+    const { baseUrl, server } = await startServerRaw((req, res) => {
+      if (req.method === "GET" && req.url === "/api/v1/csrf-token") {
+        tokenRequests += 1;
+        sendJSON(res, 200, { csrf_token: "the-real-token" });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/v1/sessions") {
+        postCount += 1;
+        const token = req.headers["x-csrf-token"] as string | undefined;
+        if (postCount === 1) {
+          firstPostToken = token;
+        } else {
+          secondPostToken = token;
+        }
+        sendJSON(res, 201, readFixture("create_idle.json"));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    activeServer = server;
+
+    const transport = new BFFTransport({ baseUrl });
+
+    // No mint at construction — see BFFTransport's constructor doc.
+    expect(tokenRequests).toBe(0);
+
+    const result = await transport.createSession();
+    expect(result).toEqual(readFixture("create_idle.json"));
+    expect(tokenRequests).toBe(1);
+    expect(firstPostToken).toBe("the-real-token");
+
+    // A second control request reuses the cached token — no second mint.
+    await transport.createSession();
+    expect(tokenRequests).toBe(1);
+    expect(secondPostToken).toBe("the-real-token");
+  });
+
+  it("retries exactly once after a csrf_invalid rejection, re-mints, and succeeds with the fresh token", async () => {
+    let tokenCount = 0;
+    let postCount = 0;
+    const seenTokens: (string | undefined)[] = [];
+    const { baseUrl, server } = await startServerRaw((req, res) => {
+      if (req.method === "GET" && req.url === "/api/v1/csrf-token") {
+        tokenCount += 1;
+        sendJSON(res, 200, { csrf_token: `token-${tokenCount}` });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/v1/sessions") {
+        postCount += 1;
+        seenTokens.push(req.headers["x-csrf-token"] as string | undefined);
+        if (postCount === 1) {
+          sendJSON(res, 403, { error: { code: "csrf_invalid", message: "token expired", retryable: true } });
+          return;
+        }
+        sendJSON(res, 201, readFixture("create_idle.json"));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    activeServer = server;
+
+    const transport = new BFFTransport({ baseUrl });
+    const result = await transport.createSession();
+
+    expect(result).toEqual(readFixture("create_idle.json"));
+    expect(postCount).toBe(2);
+    expect(tokenCount).toBe(2); // one mint for the original attempt, one re-mint for the retry
+    expect(seenTokens).toEqual(["token-1", "token-2"]); // retry used the FRESH token, not the stale one
+  });
+
+  it("caps CSRF retry at exactly one attempt — never loops, even if every attempt is rejected", async () => {
+    let postCount = 0;
+    let tokenCount = 0;
+    const { baseUrl, server } = await startServerRaw((req, res) => {
+      if (req.method === "GET" && req.url === "/api/v1/csrf-token") {
+        tokenCount += 1;
+        sendJSON(res, 200, { csrf_token: `always-rejected-${tokenCount}` });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/v1/sessions") {
+        postCount += 1;
+        sendJSON(res, 403, { error: { code: "csrf_invalid", message: "nope", retryable: true } });
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    activeServer = server;
+
+    const transport = new BFFTransport({ baseUrl });
+    const rejection = transport.createSession();
+    await expect(rejection).rejects.toBeInstanceOf(CSRFRejectedError);
+
+    // Exactly original + one retry, never a third attempt.
+    expect(postCount).toBe(2);
+    expect(tokenCount).toBe(2);
+  });
+
+  it("does NOT retry on a non-CSRF 403 (origin_not_allowed)", async () => {
+    let postCount = 0;
+    const { baseUrl, server } = await startServerRaw((req, res) => {
+      if (req.method === "GET" && req.url === "/api/v1/csrf-token") {
+        sendJSON(res, 200, { csrf_token: "irrelevant" });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/v1/sessions") {
+        postCount += 1;
+        sendJSON(res, 403, { error: { code: "origin_not_allowed", message: "host not allowed", retryable: false } });
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    activeServer = server;
+
+    const transport = new BFFTransport({ baseUrl });
+    const rejection = transport.createSession();
+
+    await expect(rejection).rejects.toBeInstanceOf(OriginNotAllowedError);
+    await expect(rejection).rejects.not.toBeInstanceOf(CSRFRejectedError);
+    expect(postCount).toBe(1); // never retried
+  });
+
+  it("shares exactly one in-flight mint across N concurrent control requests", async () => {
+    let tokenRequests = 0;
+    const { baseUrl, server } = await startServerRaw((req, res) => {
+      if (req.method === "GET" && req.url === "/api/v1/csrf-token") {
+        tokenRequests += 1;
+        // A small delay so the concurrent callers below genuinely overlap
+        // rather than serializing by accident.
+        setTimeout(() => sendJSON(res, 200, { csrf_token: "shared-token" }), 20);
+        return;
+      }
+      if (req.method === "POST" && req.url === `/api/v1/sessions/${sid}/input`) {
+        sendJSON(res, 200, readFixture("input.json"));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    activeServer = server;
+
+    const transport = new BFFTransport({ baseUrl });
+    const concurrentCallCount = 5;
+    await Promise.all(
+      Array.from({ length: concurrentCallCount }, () =>
+        transport.submit(sid, { blocks: [{ type: "text", text: "hi" }] }),
+      ),
+    );
+
+    expect(tokenRequests).toBe(1);
+  });
+
+  it("createSession's retry generates and reuses ONE Idempotency-Key when the caller supplied none — the rejected original attempt carries no key at all", async () => {
+    let postCount = 0;
+    let tokenCount = 0;
+    const seenKeys: (string | undefined)[] = [];
+    const { baseUrl, server } = await startServerRaw((req, res) => {
+      if (req.method === "GET" && req.url === "/api/v1/csrf-token") {
+        tokenCount += 1;
+        sendJSON(res, 200, { csrf_token: `k-${tokenCount}` });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/v1/sessions") {
+        postCount += 1;
+        seenKeys.push(req.headers["idempotency-key"] as string | undefined);
+        if (postCount === 1) {
+          sendJSON(res, 403, { error: { code: "csrf_invalid", message: "expired", retryable: true } });
+          return;
+        }
+        sendJSON(res, 201, readFixture("create_idle.json"));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    activeServer = server;
+
+    const transport = new BFFTransport({ baseUrl });
+    await transport.createSession();
+
+    expect(postCount).toBe(2);
+    expect(seenKeys[0]).toBeUndefined(); // original attempt: no key — it never reached serve (CSRFGuard rejected it first), so no session was ever at risk
+    expect(seenKeys[1]).not.toBeUndefined(); // retry: a key was generated so it can never spawn a second session if retried again
+    expect(typeof seenKeys[1]).toBe("string");
+  });
+
+  it("createSession's retry reuses a CALLER-SUPPLIED Idempotency-Key verbatim — never replaces it", async () => {
+    let postCount = 0;
+    let tokenCount = 0;
+    const seenKeys: (string | undefined)[] = [];
+    const callerKey = "caller-chosen-key-abc";
+    const { baseUrl, server } = await startServerRaw((req, res) => {
+      if (req.method === "GET" && req.url === "/api/v1/csrf-token") {
+        tokenCount += 1;
+        sendJSON(res, 200, { csrf_token: `k-${tokenCount}` });
+        return;
+      }
+      if (req.method === "POST" && req.url === "/api/v1/sessions") {
+        postCount += 1;
+        seenKeys.push(req.headers["idempotency-key"] as string | undefined);
+        if (postCount === 1) {
+          sendJSON(res, 403, { error: { code: "csrf_invalid", message: "expired", retryable: true } });
+          return;
+        }
+        sendJSON(res, 201, readFixture("create_idle.json"));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    activeServer = server;
+
+    const transport = new BFFTransport({ baseUrl });
+    await transport.createSession(undefined, { idempotencyKey: callerKey });
+
+    expect(postCount).toBe(2);
+    expect(seenKeys[0]).toBe(callerKey);
+    expect(seenKeys[1]).toBe(callerKey); // retry reused the SAME caller-supplied key, not a freshly generated one
+  });
+
+  it("generateIdempotencyKey() mints distinct values (sanity check the generator used for the retry-safety guarantee above is genuinely random per call)", () => {
+    const a = generateIdempotencyKey();
+    const b = generateIdempotencyKey();
+    expect(a).not.toBe(b);
   });
 });
