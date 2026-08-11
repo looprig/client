@@ -3,9 +3,11 @@ package compose_test
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/looprig/client/internal/bff"
 	"github.com/looprig/client/internal/compose"
 	"github.com/looprig/client/internal/config"
 	"github.com/looprig/storage"
@@ -51,7 +53,7 @@ func TestBuild_MountedBrowseOnly(t *testing.T) {
 	cfg := config.Config{Addr: config.DefaultAddr, Store: "fs:/tmp/x"}
 	backend := newFakeBackend()
 
-	mux, closeFn, err := compose.Build(context.Background(), cfg, backend.opener())
+	mux, closeFn, err := compose.Build(context.Background(), cfg, backend.opener(), bff.NewHostOriginGuard())
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
@@ -105,7 +107,7 @@ func TestBuild_MountedHostEnabled(t *testing.T) {
 	}
 	backend := newFakeBackend()
 
-	mux, closeFn, err := compose.Build(context.Background(), cfg, backend.opener())
+	mux, closeFn, err := compose.Build(context.Background(), cfg, backend.opener(), bff.NewHostOriginGuard())
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
@@ -144,7 +146,7 @@ func TestBuild_ProxiedHostEnabled(t *testing.T) {
 	}
 	backend := newFakeBackend()
 
-	mux, closeFn, err := compose.Build(context.Background(), cfg, backend.opener())
+	mux, closeFn, err := compose.Build(context.Background(), cfg, backend.opener(), bff.NewHostOriginGuard())
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
@@ -178,7 +180,7 @@ func TestBuild_NoDataSource(t *testing.T) {
 	t.Parallel()
 
 	backend := newFakeBackend()
-	_, _, err := compose.Build(context.Background(), config.Config{Addr: config.DefaultAddr}, backend.opener())
+	_, _, err := compose.Build(context.Background(), config.Config{Addr: config.DefaultAddr}, backend.opener(), bff.NewHostOriginGuard())
 	if err == nil {
 		t.Fatal("Build() with neither Store nor HostURL set: error = nil, want NoDataSourceError")
 	}
@@ -200,7 +202,7 @@ func TestBuild_BackendOpenError(t *testing.T) {
 	backend.openErr = errors.New("boom: disk full")
 
 	cfg := config.Config{Addr: config.DefaultAddr, Store: "fs:/tmp/x"}
-	mux, closeFn, err := compose.Build(context.Background(), cfg, backend.opener())
+	mux, closeFn, err := compose.Build(context.Background(), cfg, backend.opener(), bff.NewHostOriginGuard())
 	if err == nil {
 		t.Fatal("Build() with a failing BackendOpener: error = nil, want non-nil")
 	}
@@ -219,8 +221,77 @@ func TestBuild_MissingBackendOpener(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Config{Addr: config.DefaultAddr, Store: "fs:/tmp/x"}
-	_, _, err := compose.Build(context.Background(), cfg, nil)
+	_, _, err := compose.Build(context.Background(), cfg, nil, bff.NewHostOriginGuard())
 	if err == nil {
 		t.Fatal("Build() with cfg.Store set and a nil BackendOpener: error = nil, want non-nil")
+	}
+}
+
+// TestBuildAndHandlerShareOneGuard proves the code-quality-review fix: Build
+// and Handler are called with the SAME *bff.HostOriginGuard instance —
+// exactly as a real main() does (see cmd/looprig-client/main.go and
+// cmd/looprig-client-local/main.go, both of which construct one guard and
+// pass it to both calls) — rather than each independently constructing its
+// own. The guard here is configured with an extraAllowedHosts entry neither
+// call site could know about on its own; if Build and Handler still built
+// two separate guards, only a caller who remembered to configure BOTH
+// construction sites identically would get consistent behavior, and a
+// caller who updated one and forgot the other (exactly the drift this fix
+// closes) would see the API and SPA routes disagree about the same
+// Host/Origin. Threading one instance through both makes that divergence
+// structurally impossible: there is only one place extraAllowedHosts is
+// ever consulted, for both routes.
+func TestBuildAndHandlerShareOneGuard(t *testing.T) {
+	t.Parallel()
+
+	guard := bff.NewHostOriginGuard("extra.example")
+	backend := newFakeBackend()
+	cfg := config.Config{Addr: config.DefaultAddr, Store: "fs:/tmp/x"}
+
+	mux, closeFn, err := compose.Build(context.Background(), cfg, backend.opener(), guard)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := closeFn(context.Background()); cerr != nil {
+			t.Errorf("closeFn() error = %v", cerr)
+		}
+	})
+
+	spaCalled := false
+	spa := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		spaCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := compose.Handler(mux, spa, guard)
+
+	// A Host only reachable via guard's extraAllowedHosts (not loopback, not
+	// the default allowlist) must be accepted on BOTH the API subtree and
+	// the SPA fallthrough — proving they consult the same allowlist.
+	apiRec := httptest.NewRecorder()
+	apiReq := httptest.NewRequest("GET", "/api/v1/capabilities", nil)
+	apiReq.Host = "extra.example"
+	handler.ServeHTTP(apiRec, apiReq)
+	if apiRec.Code == http.StatusForbidden {
+		t.Errorf("GET /api/v1/capabilities with Host = extra.example: status = 403, want the request to pass the guard (extra.example is in guard's allowlist)")
+	}
+
+	spaRec := httptest.NewRecorder()
+	spaReq := httptest.NewRequest("GET", "/", nil)
+	spaReq.Host = "extra.example"
+	handler.ServeHTTP(spaRec, spaReq)
+	if spaRec.Code != http.StatusOK || !spaCalled {
+		t.Errorf("GET / with Host = extra.example: status = %d, spaCalled = %v, want 200/true (extra.example is in guard's allowlist)", spaRec.Code, spaCalled)
+	}
+
+	// Conversely, a host NOT in guard's allowlist at all must be rejected on
+	// both, for the same reason: one guard, one allowlist, no seam through
+	// which the two routes could disagree.
+	rejectRec := httptest.NewRecorder()
+	rejectReq := httptest.NewRequest("GET", "/", nil)
+	rejectReq.Host = "totally-untrusted.example"
+	handler.ServeHTTP(rejectRec, rejectReq)
+	if rejectRec.Code != http.StatusForbidden {
+		t.Errorf("GET / with an unallowed Host: status = %d, want 403", rejectRec.Code)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/looprig/client/internal/bff"
 	"github.com/looprig/client/internal/compose"
 )
 
@@ -21,7 +22,7 @@ func TestHandler(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	handler := compose.Handler(api, spa)
+	handler := compose.Handler(api, spa, bff.NewHostOriginGuard())
 
 	tests := []struct {
 		name        string
@@ -75,7 +76,7 @@ func TestHandlerHostOriginGuard(t *testing.T) {
 		spaCalled = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := compose.Handler(api, spa)
+	handler := compose.Handler(api, spa, bff.NewHostOriginGuard())
 
 	tests := []struct {
 		name string

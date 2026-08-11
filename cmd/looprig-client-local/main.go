@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/looprig/client/internal/bff"
 	"github.com/looprig/client/internal/compose"
 	"github.com/looprig/client/internal/config"
 	"github.com/looprig/client/internal/storespec"
@@ -63,7 +64,13 @@ func run() error {
 	buildCtx, cancelBuild := context.WithTimeout(runCtx, buildTimeout)
 	defer cancelBuild()
 
-	mux, closeBackend, err := compose.Build(buildCtx, cfg, openFSBackend)
+	// Constructed ONCE and threaded through both Build (wraps the BFF mux
+	// internally) and Handler (wraps the whole top-level SPA+API surface),
+	// so the two never risk drifting into differently configured guards —
+	// see compose.Build's doc for the full rationale.
+	guard := bff.NewHostOriginGuard()
+
+	mux, closeBackend, err := compose.Build(buildCtx, cfg, openFSBackend, guard)
 	if err != nil {
 		return fmt.Errorf("build: %w", err)
 	}
@@ -75,7 +82,7 @@ func run() error {
 		}
 	}()
 
-	handler := compose.Handler(mux, webui.Handler())
+	handler := compose.Handler(mux, webui.Handler(), guard)
 	srv := compose.NewServer(cfg.Addr, handler)
 
 	slog.Info("looprig-client-local: listening", "addr", cfg.Addr, "mode", modeLabel(cfg))

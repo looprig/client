@@ -46,6 +46,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/looprig/client/internal/bff"
 	"github.com/looprig/client/internal/compose"
 	"github.com/looprig/client/internal/config"
 	"github.com/looprig/client/internal/stubserve"
@@ -304,7 +305,8 @@ func TestIntegrationBrowseOnlyHistory(t *testing.T) {
 	}
 
 	cfg := config.Config{Addr: config.DefaultAddr, Store: "fs:/seeded"}
-	mux, closeFn, err := compose.Build(context.Background(), cfg, opener)
+	guard := bff.NewHostOriginGuard()
+	mux, closeFn, err := compose.Build(context.Background(), cfg, opener, guard)
 	if err != nil {
 		t.Fatalf("compose.Build() err = %v", err)
 	}
@@ -314,7 +316,7 @@ func TestIntegrationBrowseOnlyHistory(t *testing.T) {
 		}
 	})
 
-	baseURL := startComposedServer(t, compose.Handler(mux, webui.Handler()))
+	baseURL := startComposedServer(t, compose.Handler(mux, webui.Handler(), guard))
 
 	// 1. List sessions: the seeded session appears.
 	if status, body := httpGetBody(t, baseURL+"/api/v1/sessions"); status != http.StatusOK || !strings.Contains(body, sid.String()) {
@@ -432,13 +434,14 @@ func TestIntegrationLiveTailReconnect(t *testing.T) {
 		HostToken:   "test-host-token",
 		HostEnabled: true,
 	}
-	mux, closeFn, err := compose.Build(context.Background(), cfg, nil)
+	guard := bff.NewHostOriginGuard()
+	mux, closeFn, err := compose.Build(context.Background(), cfg, nil, guard)
 	if err != nil {
 		t.Fatalf("compose.Build() err = %v", err)
 	}
 	t.Cleanup(func() { _ = closeFn(context.Background()) })
 
-	baseURL := startComposedServer(t, compose.Handler(mux, webui.Handler()))
+	baseURL := startComposedServer(t, compose.Handler(mux, webui.Handler(), guard))
 	eventsURL := baseURL + "/api/v1/sessions/" + sid.String() + "/events"
 
 	// 1. Fresh connection: no Last-Event-ID sent, none observed upstream.
@@ -528,13 +531,14 @@ func TestIntegrationUpstreamDown(t *testing.T) {
 		HostToken:   "test-host-token",
 		HostEnabled: true,
 	}
-	mux, closeFn, err := compose.Build(context.Background(), cfg, nil)
+	guard := bff.NewHostOriginGuard()
+	mux, closeFn, err := compose.Build(context.Background(), cfg, nil, guard)
 	if err != nil {
 		t.Fatalf("compose.Build() err = %v", err)
 	}
 	t.Cleanup(func() { _ = closeFn(context.Background()) })
 
-	baseURL := startComposedServer(t, compose.Handler(mux, webui.Handler()))
+	baseURL := startComposedServer(t, compose.Handler(mux, webui.Handler(), guard))
 	sid := fixedIntegrationUUID(0x70)
 
 	tests := []struct {

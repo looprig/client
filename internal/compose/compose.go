@@ -100,7 +100,19 @@ func (e *InvalidHostURLError) Unwrap() error { return e.Err }
 // function (mounted mode) or noopClose (proxied mode, no local backend ever
 // opened). Callers must call it during shutdown regardless of which mode was
 // selected.
-func Build(ctx context.Context, cfg config.Config, openBackend BackendOpener) (mux *bff.BFFMux, closeFn func(context.Context) error, err error) {
+//
+// guard is the single *bff.HostOriginGuard Build wraps the BFF mux in. It is
+// caller-constructed and caller-owned rather than built here, specifically
+// so the SAME instance can also be passed to Handler (handler.go), which
+// wraps the whole top-level surface (SPA + API) in it. Two independently
+// constructed guards — one here, one in Handler — are identical only by
+// coincidence today (both call bff.NewHostOriginGuard() with no arguments);
+// the moment either call site starts threading cfg-derived
+// extraAllowedHosts through, that coincidence breaks and the two guards can
+// silently diverge (see NewHostOriginGuard's doc for extraAllowedHosts).
+// Threading one instance through both call sites makes that divergence
+// structurally impossible instead of merely untested.
+func Build(ctx context.Context, cfg config.Config, openBackend BackendOpener, guard *bff.HostOriginGuard) (mux *bff.BFFMux, closeFn func(context.Context) error, err error) {
 	if cfg.Store == "" && cfg.HostURL == "" {
 		return nil, nil, &NoDataSourceError{}
 	}
@@ -109,8 +121,6 @@ func Build(ctx context.Context, cfg config.Config, openBackend BackendOpener) (m
 	if err != nil {
 		return nil, nil, err
 	}
-
-	guard := bff.NewHostOriginGuard()
 
 	if !cfg.HostEnabled {
 		return bff.NewBrowseOnlyMux(read, guard), closeBackend, nil
