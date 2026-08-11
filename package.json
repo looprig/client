@@ -1,5 +1,8 @@
 {
   "name": "looprig-client-workspace",
   "private": true,
-  "workspaces": ["sdk/core", "sdk/svelte", "app"]
+  "workspaces": ["sdk/core", "sdk/svelte", "app"],
+  "scripts": {
+    "docs:examples": "npm run typecheck:examples --workspace @looprig/client && npm run typecheck:examples --workspace @looprig/svelte && tsc -p examples/docs/stage20_web_client/tsconfig.json && svelte-check --workspace examples/docs/stage20_web_client --config svelte.config.js --tsconfig tsconfig.json --fail-on-warnings"
+  }
 }

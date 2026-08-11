@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 1,
+  "repository": "client",
+  "proofSources": [
+    {
+      "id": "example-client-framework-neutral-session-source",
+      "type": "source",
+      "path": "sdk/core/examples/session-client.ts"
+    },
+    {
+      "id": "example-client-vanilla-session-binding-source",
+      "type": "source",
+      "path": "sdk/core/examples/vanilla-session.ts"
+    },
+    {
+      "id": "example-client-svelte-session-page-source",
+      "type": "source",
+      "path": "sdk/svelte/examples/session-page.svelte"
+    },
+    {
+      "id": "example-client-stage20-session-client-source",
+      "type": "source",
+      "path": "examples/docs/stage20_web_client/session-client.ts"
+    },
+    {
+      "id": "example-client-stage20-vanilla-session-source",
+      "type": "source",
+      "path": "examples/docs/stage20_web_client/vanilla-session.ts"
+    },
+    {
+      "id": "example-client-stage20-svelte-page-source",
+      "type": "source",
+      "path": "examples/docs/stage20_web_client/SessionPage.svelte"
+    },
+    {
+      "id": "example-client-embedded-webui-placeholder-source",
+      "type": "source",
+      "path": "examples/webui/main.go"
+    }
+  ],
+  "examples": [
+    {
+      "id": "example-client-framework-neutral-session",
+      "ecosystem": "npm",
+      "owner": "client",
+      "sourcePath": "sdk/core/examples/session-client.ts",
+      "availability": "source-workspace",
+      "versions": {
+        "@looprig/client": "source-workspace"
+      },
+      "offlineCommand": "npm run docs:examples",
+      "assertion": "The compiled framework-neutral facade composes validated transport calls, the exact history/live join, SessionView folding, text submission, gate response, and interrupt without a UI framework.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "The returned disconnect function aborts the live join; the compile check creates no persistent resources.",
+      "liveGate": null,
+      "proofIds": [
+        "example-client-framework-neutral-session-source"
+      ]
+    },
+    {
+      "id": "example-client-vanilla-session-binding",
+      "ecosystem": "npm",
+      "owner": "client",
+      "sourcePath": "sdk/core/examples/vanilla-session.ts",
+      "availability": "source-workspace",
+      "versions": {
+        "@looprig/client": "source-workspace"
+      },
+      "offlineCommand": "npm run docs:examples",
+      "assertion": "The compiled DOM binding subscribes to framework-neutral SessionView state and forwards submit and interrupt actions, proving no framework adapter is required.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "The returned disposer disconnects the session and removes both DOM event listeners.",
+      "liveGate": null,
+      "proofIds": [
+        "example-client-vanilla-session-binding-source",
+        "example-client-framework-neutral-session-source"
+      ]
+    },
+    {
+      "id": "example-client-svelte-session-page",
+      "ecosystem": "npm",
+      "owner": "client",
+      "sourcePath": "sdk/svelte/examples/session-page.svelte",
+      "availability": "source-workspace",
+      "versions": {
+        "@looprig/client": "source-workspace",
+        "@looprig/svelte": "source-workspace"
+      },
+      "offlineCommand": "npm run docs:examples",
+      "assertion": "svelte-check proves the optional Svelte convenience stores bind the same core live SessionView and action APIs without duplicating protocol logic.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "The component effect stops the live and gate stores when it is destroyed.",
+      "liveGate": null,
+      "proofIds": [
+        "example-client-svelte-session-page-source"
+      ]
+    },
+    {
+      "id": "example-client-stage20-web-client",
+      "stage": 20,
+      "ecosystem": "npm",
+      "owner": "client",
+      "sourcePath": "examples/docs/stage20_web_client/SessionPage.svelte",
+      "availability": "source-workspace",
+      "versions": {
+        "@looprig/client": "source-workspace",
+        "@looprig/svelte": "source-workspace"
+      },
+      "offlineCommand": "npm run docs:examples",
+      "assertion": "The stage 20 command typechecks both framework-neutral TypeScript files and runs svelte-check on the optional SessionPage component.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "The examples only compile local source-workspace files and create no persistent resources.",
+      "liveGate": null,
+      "proofIds": [
+        "example-client-stage20-session-client-source",
+        "example-client-stage20-vanilla-session-source",
+        "example-client-stage20-svelte-page-source"
+      ]
+    },
+    {
+      "id": "example-client-embedded-webui-placeholder",
+      "ecosystem": "go",
+      "owner": "client",
+      "sourcePath": "examples/webui/main.go",
+      "availability": "source-workspace",
+      "versions": {
+        "github.com/looprig/client": "source-workspace"
+      },
+      "offlineCommand": "GOWORK=off go run ./examples/webui",
+      "assertion": "A terminating httptest recorder renders an explicitly labeled embedded SPA placeholder until a real application build exists.",
+      "workflowPath": ".github/workflows/docs-examples.yml",
+      "jobId": "docs-examples",
+      "cleanup": "The deterministic command starts no listener and retains no files or processes.",
+      "liveGate": null,
+      "proofIds": [
+        "example-client-embedded-webui-placeholder-source"
+      ]
+    }
+  ]
+}

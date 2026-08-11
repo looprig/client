@@ -1,0 +1,34 @@
+name: docs examples
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  docs-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: make test build
+      - run: GOWORK=off go test -race ./...
+      - run: npm --prefix sdk/core test
+      - run: npm --prefix sdk/core run build
+      - run: npm --prefix sdk/core run typecheck
+      - run: npm --prefix sdk/svelte test
+      - run: npm --prefix sdk/svelte run build
+      - run: npm --prefix sdk/svelte run typecheck
+      - run: npx playwright install --with-deps chromium
+      - run: npm --prefix app test
+      - run: npm --prefix app run check
+      - run: npm --prefix app run build
+      - run: npm run docs:examples
+      - run: GOWORK=off go run ./examples/webui
