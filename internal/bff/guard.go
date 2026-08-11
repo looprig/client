@@ -65,16 +65,16 @@ func (g *HostOriginGuard) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !g.hostAllowed(r.Host) {
 			slog.Warn("bff: rejected request: host not allowed", "host", r.Host)
-			http.Error(w, "forbidden: host not allowed", http.StatusForbidden)
+			writeBFFError(w, http.StatusForbidden, codeOriginNotAllowed, "host not allowed", false)
 			return
 		}
 		// A request with NO Origin header at all passes this check — many
 		// legitimate non-browser or simple-GET requests carry no Origin.
 		// Only a request that HAS an Origin pointing somewhere else is
 		// rejected.
-		if origin := r.Header.Get("Origin"); origin != "" && !g.originAllowed(origin) {
+		if origin := r.Header.Get("Origin"); origin != "" && !g.originAllowed(origin, r.Host) {
 			slog.Warn("bff: rejected request: origin not allowed", "host", r.Host, "origin", origin)
-			http.Error(w, "forbidden: origin not allowed", http.StatusForbidden)
+			writeBFFError(w, http.StatusForbidden, codeOriginNotAllowed, "origin not allowed", false)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -94,21 +94,41 @@ func (g *HostOriginGuard) hostAllowed(hostHeader string) bool {
 	return g.allowedHosts[strings.ToLower(host)]
 }
 
-// originAllowed reports whether origin (an Origin header value) names one of g's
-// allowed hosts, ignoring scheme and port — only the hostname component is
-// compared, symmetric with hostAllowed's "any port" and case-insensitive
-// treatment of the Host header. An unparseable Origin, or one with no host at
-// all (e.g. the literal string "null" browsers send for some
-// sandboxed/cross-origin contexts), fails secure: false. An Origin carrying
-// userinfo (e.g.
-// "http://evil.example@127.0.0.1/") is also rejected: real browsers never
-// construct an Origin header with a userinfo component, so this isn't
-// exploitable under the actual threat model, but url.URL.Hostname() ignores
-// userinfo entirely, so without this check such an Origin would otherwise be
-// compared and accepted on the userinfo's *host* portion alone — a cheap,
-// fail-secure tightening against a spoofed-looking value that has no
-// legitimate reason to appear here.
-func (g *HostOriginGuard) originAllowed(origin string) bool {
+// originAllowed reports whether origin (an Origin header value) names EXACTLY
+// the same host:port pair the server received in hostHeader (r.Host) —
+// ignoring ONLY the scheme. This is deliberately an exact comparison against
+// THIS request's own Host, not membership in g's general allowed-hosts set:
+// an Origin naming a DIFFERENT port (or, for that matter, a different
+// loopback host form entirely — 127.0.0.1 vs localhost vs [::1] — even
+// though each is independently allowed as a Host) is a different origin by
+// browser same-origin rules and must be rejected here, even though a naive
+// "is the hostname one of the allowed forms" check would have let it
+// through. (Because hostAllowed already validated hostHeader itself before
+// this function is ever called, requiring exact equality to it automatically
+// inherits that guarantee — there's no need to separately consult
+// g.allowedHosts here.)
+//
+// Scheme is ignored deliberately, not by oversight: a TLS-terminating
+// reverse proxy in front of this BFF can make the Origin's scheme (https, as
+// seen by the browser) differ from what this process itself sees on its own
+// listener (http) — and http and https can never both be live on the same
+// host:port in a normal deployment, so scheme-blindness here is safe. Port
+// was the actual gap this function used to have: a same-host, different-port
+// origin (e.g. a Vite dev server on :5173, or any other local process on any
+// other loopback port) used to pass this check, which combined with no CSRF
+// delivery mechanism once meant any page on any loopback port could reach
+// this BFF's control routes. See csrf.go's TokenHandler for the other half
+// of that fix.
+//
+// An unparseable Origin, one with no host at all (e.g. the literal string
+// "null" browsers send for some sandboxed/cross-origin contexts), or one
+// carrying userinfo (e.g. "http://evil.example@127.0.0.1:7777/" — real
+// browsers never construct an Origin header with a userinfo component, so
+// this isn't exploitable under the actual threat model, but url.URL.Host
+// ignores userinfo entirely, so without this explicit check such an Origin
+// would otherwise be compared on its userinfo's *host* portion alone), all
+// fail secure: false.
+func (g *HostOriginGuard) originAllowed(origin, hostHeader string) bool {
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
@@ -116,11 +136,10 @@ func (g *HostOriginGuard) originAllowed(origin string) bool {
 	if u.User != nil {
 		return false
 	}
-	host := strings.ToLower(u.Hostname())
-	if host == "" {
+	if u.Host == "" {
 		return false
 	}
-	return g.allowedHosts[host]
+	return strings.EqualFold(u.Host, hostHeader)
 }
 
 // splitHost extracts the hostname portion of an HTTP Host header, tolerating

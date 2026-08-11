@@ -7,6 +7,7 @@ package bff_test
 // recorded status code exactly as a real client would observe it.
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,6 +53,146 @@ func TestCSRFGuardLogsRejection(t *testing.T) {
 	}
 	if strings.Contains(out, valid) {
 		t.Errorf("log output = %q, must never contain the expected/valid token value", out)
+	}
+}
+
+// TestCSRFGuardRejectionEnvelope proves a rejection writes the JSON error
+// envelope (not plain text) with the distinct "csrf_invalid" code,
+// retryable: true — distinguishable from HostOriginGuard's own
+// "origin_not_allowed" code (guard_test.go's
+// TestHostOriginGuardRejectionEnvelope) so a client can safely decide
+// whether retrying (clear cached token, re-mint, retry once) is worthwhile.
+func TestCSRFGuardRejectionEnvelope(t *testing.T) {
+	t.Parallel()
+
+	guard := bff.NewCSRFGuard(time.Hour)
+	handler := guard.Wrap(okHandler)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/abc/input", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	wire := decodeBFFError(t, rec)
+	if wire.Error.Code != "csrf_invalid" {
+		t.Errorf("error.code = %q, want %q", wire.Error.Code, "csrf_invalid")
+	}
+	if !wire.Error.Retryable {
+		t.Error("error.retryable = false, want true: a client should clear its cached token, re-mint, and retry once")
+	}
+	if wire.Error.Message == "" {
+		t.Error("error.message is empty, want a client-safe description")
+	}
+}
+
+// csrfTokenWire decodes TokenHandler's JSON body.
+type csrfTokenWire struct {
+	CSRFToken string `json:"csrf_token"`
+}
+
+// TestCSRFGuardTokenHandler covers Fix C's delivery mechanism end to end: it
+// mints a real, usable token, sets the right headers (JSON content type,
+// nosniff, never-cache), and the minted token subsequently verifies against
+// the SAME guard's Wrap.
+func TestCSRFGuardTokenHandler(t *testing.T) {
+	t.Parallel()
+
+	guard := bff.NewCSRFGuard(time.Hour)
+	tokenHandler := guard.TokenHandler()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/csrf-token", nil)
+	rec := httptest.NewRecorder()
+	tokenHandler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q (a security token must never be cached)", got, "no-store")
+	}
+
+	var wire csrfTokenWire
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatalf("json.Unmarshal(token response) err = %v; body = %s", err, rec.Body.String())
+	}
+	if wire.CSRFToken == "" {
+		t.Fatal("csrf_token is empty")
+	}
+
+	// The minted token must genuinely verify against the SAME guard's Wrap —
+	// proving TokenHandler really calls Mint, not a decoy value.
+	controlHandler := guard.Wrap(okHandler)
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/sessions/abc/input", nil)
+	postReq.Header.Set(bff.CSRFHeaderName, wire.CSRFToken)
+	postRec := httptest.NewRecorder()
+	controlHandler.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusOK {
+		t.Errorf("POST with TokenHandler-minted token status = %d, want %d", postRec.Code, http.StatusOK)
+	}
+
+	// Two calls to TokenHandler mint two distinct tokens (each call invokes
+	// Mint, which uses crypto/rand — collisions astronomically unlikely).
+	rec2 := httptest.NewRecorder()
+	tokenHandler.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/api/v1/csrf-token", nil))
+	var wire2 csrfTokenWire
+	if err := json.Unmarshal(rec2.Body.Bytes(), &wire2); err != nil {
+		t.Fatalf("json.Unmarshal(second token response) err = %v", err)
+	}
+	if wire2.CSRFToken == wire.CSRFToken {
+		t.Error("two TokenHandler calls minted the same token")
+	}
+}
+
+// TestCSRFGuardBoundedTokenStore proves Fix B's cap: minting more than the
+// bound's worth of tokens evicts the OLDEST survivors first, so the live
+// token count never exceeds the bound regardless of how many times a client
+// (or an abusive one) calls Mint/TokenHandler.
+func TestCSRFGuardBoundedTokenStore(t *testing.T) {
+	t.Parallel()
+
+	guard := bff.NewCSRFGuard(time.Hour)
+	handler := guard.Wrap(okHandler)
+
+	// maxCSRFTokens is unexported (bff-internal); this test mints comfortably
+	// more than any plausible bound (64, per the package doc) to prove
+	// eviction happened without depending on the exact constant value.
+	const mintCount = 100
+	tokens := make([]string, mintCount)
+	for i := range tokens {
+		tok, err := guard.Mint()
+		if err != nil {
+			t.Fatalf("Mint() #%d error = %v", i, err)
+		}
+		tokens[i] = tok
+	}
+
+	verify := func(tok string) int {
+		req := httptest.NewRequest(http.MethodPost, "/v1/sessions/abc/input", nil)
+		req.Header.Set(bff.CSRFHeaderName, tok)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// The earliest-minted tokens must have been evicted (oldest-first).
+	if got := verify(tokens[0]); got != http.StatusForbidden {
+		t.Errorf("oldest token (of %d minted) status = %d, want %d (evicted)", mintCount, got, http.StatusForbidden)
+	}
+	// The most recently minted token must still be live.
+	if got := verify(tokens[len(tokens)-1]); got != http.StatusOK {
+		t.Errorf("newest token status = %d, want %d (still live)", got, http.StatusOK)
 	}
 }
 

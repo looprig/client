@@ -8,6 +8,7 @@ package bff_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,29 @@ import (
 
 	"github.com/looprig/client/internal/bff"
 )
+
+// bffErrorWire decodes the JSON error envelope this package's own middleware
+// (HostOriginGuard, CSRFGuard) writes on rejection — the same nested shape
+// harness's pkg/serve error envelope uses ({"error":{code,message,retryable}}).
+// Shared by guard_test.go and csrf_test.go (same test package).
+type bffErrorWire struct {
+	Error struct {
+		Code      string `json:"code"`
+		Message   string `json:"message"`
+		Retryable bool   `json:"retryable"`
+	} `json:"error"`
+}
+
+// decodeBFFError decodes rec's body as a bffErrorWire, failing the test on
+// malformed JSON.
+func decodeBFFError(t *testing.T, rec *httptest.ResponseRecorder) bffErrorWire {
+	t.Helper()
+	var wire bffErrorWire
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatalf("json.Unmarshal(error envelope) err = %v; body = %s", err, rec.Body.String())
+	}
+	return wire
+}
 
 // withCapturedLogs swaps slog's default logger for one writing structured text
 // to a buffer, for the duration of the calling test, and restores the previous
@@ -68,7 +92,17 @@ func TestHostOriginGuard(t *testing.T) {
 		{name: "loopback v6 bare, no brackets, no port", host: "::1", origin: "", want: http.StatusForbidden},
 		{name: "host malformed too many colons", host: "one:two:three", origin: "", want: http.StatusForbidden},
 		{name: "origin null literal", host: "127.0.0.1:7777", origin: "null", want: http.StatusForbidden},
-		{name: "origin same host different port", host: "127.0.0.1:7777", origin: "http://127.0.0.1:9999", want: http.StatusOK},
+		// A same-host, DIFFERENT-port origin must be rejected: to a
+		// browser (and to this guard, post-fix) that is a different
+		// origin, not the same one on a different door. This used to be
+		// StatusOK -- a real gap (see originAllowed's doc in guard.go) --
+		// until port-exactness was added.
+		{name: "origin same host different port", host: "127.0.0.1:7777", origin: "http://127.0.0.1:9999", want: http.StatusForbidden},
+		// Proves the port-exactness fix above didn't overcorrect into
+		// rejecting a genuinely same-origin (same host, same port)
+		// request -- same case as "same origin" above, restated here
+		// beside the flipped case for narrative locality.
+		{name: "origin exact host:port match still passes", host: "127.0.0.1:9999", origin: "http://127.0.0.1:9999", want: http.StatusOK},
 		{name: "origin same host different scheme", host: "127.0.0.1:7777", origin: "https://127.0.0.1:7777", want: http.StatusOK},
 		{name: "origin loopback v6", host: "[::1]:7777", origin: "http://[::1]:7777", want: http.StatusOK},
 		{name: "origin malformed", host: "127.0.0.1:7777", origin: "http://%zz", want: http.StatusForbidden},
@@ -76,7 +110,18 @@ func TestHostOriginGuard(t *testing.T) {
 		{name: "loopback with attacker subdomain host", host: "127.0.0.1.evil.example:7777", origin: "", want: http.StatusForbidden},
 		{name: "origin with userinfo rejected even though hostname is allowed", host: "127.0.0.1:7777", origin: "http://evil.example@127.0.0.1:7777", want: http.StatusForbidden},
 		{name: "uppercase localhost host", host: "LOCALHOST:7777", origin: "", want: http.StatusOK},
-		{name: "mixed case origin host", host: "127.0.0.1:7777", origin: "http://LocalHost:7777", want: http.StatusOK},
+		// Same literal host (localhost) on both sides, differing only in
+		// case -- proves originAllowed's host:port comparison is still
+		// case-insensitive. (A DIFFERENT loopback host FORM on each side --
+		// e.g. Host: 127.0.0.1 vs Origin: localhost -- is deliberately no
+		// longer accepted post-fix: see originAllowed's doc for why exact
+		// host:port equality, not independent allowlist membership, is now
+		// the rule.)
+		{name: "mixed case origin host", host: "localhost:7777", origin: "http://LocalHost:7777", want: http.StatusOK},
+		// A different loopback host FORM than the actual Host header
+		// (127.0.0.1 vs localhost) -- both independently allowed as a Host,
+		// but no longer treated as the same origin as each other.
+		{name: "origin different loopback form than host is rejected", host: "127.0.0.1:7777", origin: "http://localhost:7777", want: http.StatusForbidden},
 	}
 
 	guard := bff.NewHostOriginGuard()
@@ -164,6 +209,60 @@ func TestHostOriginGuardAdditionalAllowedHost(t *testing.T) {
 	withoutExtra.Wrap(okHandler).ServeHTTP(rec3, req3)
 	if rec3.Code != http.StatusForbidden {
 		t.Errorf("unconfigured guard on extra host status = %d, want %d", rec3.Code, http.StatusForbidden)
+	}
+}
+
+// TestHostOriginGuardRejectionEnvelope proves a rejection writes the JSON
+// error envelope (not plain text) with the distinct "origin_not_allowed"
+// code, retryable: false — distinguishable from CSRFGuard's own
+// "csrf_invalid" code (csrf_test.go's TestCSRFGuardRejectionEnvelope) so a
+// client can safely decide whether retrying is ever worthwhile. Covers both
+// rejection paths: a disallowed Host and a disallowed Origin.
+func TestHostOriginGuardRejectionEnvelope(t *testing.T) {
+	t.Parallel()
+
+	guard := bff.NewHostOriginGuard()
+	handler := guard.Wrap(okHandler)
+
+	tests := []struct {
+		name   string
+		host   string
+		origin string
+	}{
+		{name: "host not allowed", host: "evil.example:7777", origin: ""},
+		{name: "origin not allowed", host: loopbackHost, origin: "https://evil.example"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+			req.Host = tt.host
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+			}
+			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+
+			wire := decodeBFFError(t, rec)
+			if wire.Error.Code != "origin_not_allowed" {
+				t.Errorf("error.code = %q, want %q", wire.Error.Code, "origin_not_allowed")
+			}
+			if wire.Error.Retryable {
+				t.Error("error.retryable = true, want false: an origin rejection can never be fixed by retrying the identical request")
+			}
+			if wire.Error.Message == "" {
+				t.Error("error.message is empty, want a client-safe description")
+			}
+		})
 	}
 }
 
