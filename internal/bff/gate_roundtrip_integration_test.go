@@ -10,42 +10,31 @@ package bff_test
 // (bff.NewMuxWithHost) served over real HTTP, against
 // internal/stubserve's stateful stub host.
 //
-// This file builds the mux via bff.NewMuxWithHost directly rather than
-// through compose.Build, and that is a DELIBERATE, necessary divergence,
-// not a convenience shortcut — worth spelling out because it surfaces a
-// real gap:
+// UPDATE (CSRF delivery gap closed): the production-blocking gap this doc
+// comment originally centered on — no HTTP endpoint through which a real
+// browser SPA could ever obtain a token valid against a compose.Build-composed
+// mux, so EVERY real control POST was rejected 403 in production — is now
+// closed: CSRFGuard.TokenHandler (csrf.go) is registered at
+// GET /api/v1/csrf-token by NewMuxWithHost (mux.go), and sdk/core/src/
+// transport.ts's BFFTransport now fetches/caches/retries it. See this task's
+// final report for the full fix.
 //
-//   - compose.Build's NewMuxWithHost path constructs its own *bff.CSRFGuard
-//     internally (compose.go: `csrf := bff.NewCSRFGuard(0)`) and never
-//     returns it, and *bff.BFFMux keeps its csrf field unexported. There is
-//     currently NO exported seam — no HTTP endpoint, no returned value —
-//     through which any caller (a test, or a real browser SPA) can ever
-//     Mint() a token valid against a compose.Build-composed mux.
-//   - This is not merely a test inconvenience: grepping this module's own
-//     SPA and SDK source (app/src, sdk/core/src, sdk/svelte/src) for any
-//     reference to bff.CSRFHeaderName or a token-minting call turns up
-//     nothing. As currently wired, EVERY real control POST a real browser
-//     would ever send — create, restore, submit input, respond to a gate,
-//     interrupt — reaches CSRFGuard.Wrap with no token and is rejected
-//     403, in production exactly as in a naive test. See this task's final
-//     report for this flagged prominently as a production-blocking gap,
-//     independent of and prior to this test file.
-//   - internal/bff/control_test.go's own
-//     TestControlProxyRegisterRoutesAppliesCSRFThroughRealBFFMux already
-//     established the workaround this file follows: build *bff.BFFMux
-//     directly via bff.NewMuxWithHost with an externally-held *bff.CSRFGuard
-//     the test can Mint() from. Every OTHER piece this file wires — the real
-//     bff.NewControlProxy, bff.NewProxiedReadSource, bff.NewSSEProxy, and
-//     bff.NewHostOriginGuard — is exactly what compose.Build would have
-//     constructed for a proxied+host-enabled Config; only the CSRFGuard's
-//     origin (test-held vs. compose-internal) differs, and that is the one
-//     piece a real caller cannot obtain by design as this stands today.
-//
-// Unlike compose_integration_test.go's stub (plain HTTP, because
-// compose.Build never surfaces a root-CA option), this file builds the
-// three proxies BY HAND and so has direct access to bff.WithControlRootCA /
-// bff.WithRootCA / bff.WithSSERootCA — so the stub here runs real TLS,
-// demonstrating the more production-representative shape.
+// This file STILL builds the mux via bff.NewMuxWithHost directly rather than
+// through compose.Build, but for a DIFFERENT, narrower, still-valid reason
+// than before: compose.Build never surfaces a root-CA option (see
+// compose_integration_test.go's own plain-HTTP stub), while this file needs
+// direct access to bff.WithControlRootCA / bff.WithRootCA / bff.WithSSERootCA
+// to run its stub over real TLS — the more production-representative shape.
+// Switching this file to compose.Build would mean giving up that real-TLS
+// coverage, not merely swapping how a token gets minted (this file could now
+// equally well obtain a token via a real GET /api/v1/csrf-token call instead
+// of csrf.Mint() directly — buildGateRoundTripMux's csrf *bff.CSRFGuard return
+// value is kept anyway, matching internal/bff/control_test.go's own
+// TestControlProxyRegisterRoutesAppliesCSRFThroughRealBFFMux convention, and
+// there is no remaining production gap it stands in for). Left as-is rather
+// than restructured, per this task's own test-plan guidance: the TLS
+// divergence from compose.Build is a deliberate, unrelated design choice, not
+// a workaround to remove.
 
 import (
 	"encoding/json"
