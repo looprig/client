@@ -190,6 +190,12 @@ func TestNewBrowseOnlyMuxControlRoutesAbsent(t *testing.T) {
 		{name: "gate response", method: http.MethodPost, path: "/api/v1/sessions/abc/gates/g1"},
 		{name: "interrupt", method: http.MethodPost, path: "/api/v1/sessions/abc/interrupt"},
 		{name: "events", method: http.MethodGet, path: "/api/v1/sessions/abc/events"},
+		// csrf-token is itself a control-plane concern (delivering the token
+		// CSRFGuard.Wrap demands elsewhere): a browse-only deployment has no
+		// control routes to protect, so this route must be genuinely absent
+		// too, not registered-then-something-else. Same absence-proof
+		// convention as every other row in this table.
+		{name: "csrf token", method: http.MethodGet, path: "/api/v1/csrf-token"},
 	}
 
 	for _, tt := range tests {
@@ -253,6 +259,70 @@ func TestNewMuxAppliesHostOriginGuardBeforeReadSource(t *testing.T) {
 	mux.ServeHTTP(capRec, capReq)
 	if capRec.Code != http.StatusForbidden {
 		t.Errorf("GET /api/v1/capabilities with rebound host status = %d, want %d (guard must cover the synthesized route too)", capRec.Code, http.StatusForbidden)
+	}
+}
+
+// tokenWire decodes GET /api/v1/csrf-token's response body.
+type tokenWire struct {
+	CSRFToken string `json:"csrf_token"`
+}
+
+// TestNewMuxWithHostServesCSRFToken proves NewMuxWithHost genuinely wires
+// GET /api/v1/csrf-token (Fix C's delivery mechanism) end to end through the
+// real production composition — not just CSRFGuard.TokenHandler in
+// isolation (csrf_test.go's TestCSRFGuardTokenHandler already covers that):
+// the route is reachable through the real *BFFMux, and the token it mints is
+// immediately usable on a real control route served by the SAME mux.
+func TestNewMuxWithHostServesCSRFToken(t *testing.T) {
+	t.Parallel()
+
+	read, _ := newMountedSource(t)
+	csrf := bff.NewCSRFGuard(time.Hour)
+	controlProxy, eventsProxy := newTestControlHost(t)
+	mux := bff.NewMuxWithHost(read, bff.NewHostOriginGuard(), csrf, controlProxy, eventsProxy)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/csrf-token", nil)
+	req.Host = loopbackHost
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/csrf-token status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want %q", got, "no-store")
+	}
+
+	var wire tokenWire
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatalf("json.Unmarshal() err = %v; body = %s", err, rec.Body.String())
+	}
+	if wire.CSRFToken == "" {
+		t.Fatal("csrf_token is empty")
+	}
+
+	// The minted token must reach and pass the SAME mux's CSRF-protected
+	// control route.
+	postReq := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/abc/input", nil)
+	postReq.Host = loopbackHost
+	postReq.Header.Set(bff.CSRFHeaderName, wire.CSRFToken)
+	postRec := httptest.NewRecorder()
+	mux.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusOK {
+		t.Errorf("POST .../input with mux-minted token status = %d, want %d; body = %s", postRec.Code, http.StatusOK, postRec.Body.String())
+	}
+
+	// A rebound Host must be rejected before the token is ever minted — the
+	// route is behind HostOriginGuard exactly like every other route on this
+	// mux.
+	badHostReq := httptest.NewRequest(http.MethodGet, "/api/v1/csrf-token", nil)
+	badHostReq.Host = "evil.example:7777"
+	badHostRec := httptest.NewRecorder()
+	mux.ServeHTTP(badHostRec, badHostReq)
+	if badHostRec.Code != http.StatusForbidden {
+		t.Errorf("GET /api/v1/csrf-token with rebound host status = %d, want %d", badHostRec.Code, http.StatusForbidden)
 	}
 }
 

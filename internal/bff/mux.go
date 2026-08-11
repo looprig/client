@@ -11,6 +11,11 @@ package bff
 //     for why). This pattern is a literal path match, which net/http's ServeMux
 //     resolves as MORE specific than the "/api/" subtree pattern below, so it
 //     wins for this one path even though both patterns technically match it.
+//   - GET /api/v1/csrf-token     — served by CSRFGuard.TokenHandler (csrf.go),
+//     registered ONLY by NewMuxWithHost (never NewBrowseOnlyMux): the delivery
+//     mechanism for the token CSRFGuard.Wrap then demands on every control
+//     POST/PUT/PATCH/DELETE. Same literal-pattern-outranks-catch-all reasoning
+//     as capabilities above.
 //   - /api/{...}                 — everything else under /api is forwarded, prefix
 //     stripped, to the mounted/proxied ReadSource, whose own internal routing
 //     expects paths like /v1/sessions (not /api/v1/sessions). This pattern
@@ -146,6 +151,16 @@ func NewMuxWithHost(read ReadSource, guard *HostOriginGuard, csrf *CSRFGuard, co
 	mux := http.NewServeMux()
 
 	mux.Handle("GET /api/v1/capabilities", handleCapabilities(true))
+	// Literal pattern, same reasoning as GET /api/v1/capabilities above: it
+	// outranks the "/api/" catch-all subtree registered below for this one
+	// path even though both technically match it. This is the ONLY delivery
+	// mechanism for a CSRF token (csrf.go's package doc) — registered only
+	// here, never in NewBrowseOnlyMux: a browse-only deployment has no
+	// control routes to protect, so the 404 for this route in that mode is
+	// itself a truthful absence signal, consistent with every other
+	// control-shaped route this package's browse-only mode leaves genuinely
+	// unregistered (see this file's own package doc above).
+	mux.Handle("GET /api/v1/csrf-token", csrf.TokenHandler())
 	mux.Handle("/api/", http.StripPrefix("/api", read))
 
 	m := &BFFMux{mux: mux, csrf: csrf}
