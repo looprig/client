@@ -3,7 +3,7 @@
 This directory is a vendored, version-pinned copy of harness's `pkg/serve` wire
 contract: the hand-authored JSON Schema documents (`schema/`) and golden fixtures
 (`fixtures/`) that describe the `serve` HTTP/SSE protocol. `VERSION` records the
-harness version (currently `v0.23.0`, see `HARNESS_VERSION` in the `Makefile`) it
+harness version (currently `v0.25.0`, see `HARNESS_VERSION` in the `Makefile`) it
 was copied from.
 
 Vendoring these bytes verbatim, rather than depending on harness's testdata at
