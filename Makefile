@@ -7,7 +7,7 @@
 # assignments evaluated at parse time -- those need GOWORK=off prefixed directly.
 export GOWORK := off
 
-HARNESS_VERSION := v0.25.0
+HARNESS_VERSION := v0.26.0
 HARNESS_DIR := $(shell GOWORK=off go list -m -f '{{.Dir}}' github.com/looprig/harness)
 
 GO_DIRS := $(shell GOWORK=off go list -f '{{.Dir}}' ./...)
