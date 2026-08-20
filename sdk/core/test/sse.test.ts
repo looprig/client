@@ -408,14 +408,21 @@ describe("bounded scan cost: many small chunks of one large-but-under-the-cap li
 
     expect(frames).toHaveLength(1);
     expect(frames[0]!.type).toBe("error"); // unrecognized event: value, not the size cap
-    // Empirically calibrated bound: the pre-fix O(n^2) rescan-from-zero
-    // behavior measured ~2.2s for this exact shape at chunkSize=500 (and the
-    // reviewer measured >13.8s for a larger, comparable-shape repro); this
-    // fixed parser measured ~0.08s for the same input. 1000ms leaves ample
-    // headroom above the fixed behavior while sitting well below what the
-    // O(n^2) behavior actually costs, so this would fail if that rescan
-    // regressed rather than passing coincidentally on a fast machine.
-    expect(elapsedMs).toBeLessThan(1000);
+    // Empirically calibrated bound. Re-measured for this exact shape at
+    // chunkSize=200 by temporarily restoring the rescan-from-zero behavior:
+    // buggy 5193ms, fixed 170ms on a fast development machine -- a 30x
+    // separation (the same probe reproduced the originally recorded ~2.2s at
+    // chunkSize=500, so the two calibrations agree).
+    //
+    // The bound has to absorb machine speed, not just the regression. A
+    // shared GitHub-hosted runner measured 1094ms for the FIXED parser here,
+    // 6.4x this machine, which is why an earlier 1000ms bound failed twice on
+    // CI with no regression present. Scaled by that same factor the buggy
+    // behavior would cost ~33s on that runner, so 3000ms sits ~2.7x above the
+    // slowest observed correct run and ~11x below the cheapest plausible
+    // regressed one. A regression still fails this even on a machine three
+    // times slower than the CI runner.
+    expect(elapsedMs).toBeLessThan(3000);
   });
 });
 
