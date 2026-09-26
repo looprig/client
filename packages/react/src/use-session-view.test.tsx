@@ -360,18 +360,57 @@ test("wrong-session and malformed reasoning never render", async () => {
   expect(h.view.current?.liveReasoning).toEqual([]);
 });
 
-test("text and reasoning share a 64 KiB preview budget and freeze the full key", async () => {
+test("text remains visible after reasoning fills its own 64 KiB preview budget", async () => {
   const h = await mountFactoryView();
   await liveReady(h);
-  for (let i = 0; i < 3; i++) h.link.open[0]!.deliver(liveReasoning("r".repeat(16_000)));
-  h.link.open[0]!.deliver(liveText("t".repeat(16_000)));
-  await expect.poll(() => h.view.current?.liveReasoning[0]?.text.length).toBe(48_000);
-  await expect.poll(() => h.view.current?.liveText[0]?.text.length).toBe(16_000);
-  h.link.open[0]!.deliver(liveReasoning("r".repeat(2_000)));
-  h.link.open[0]!.deliver(liveReasoning("late"));
+  for (let i = 0; i < 4; i++) h.link.open[0]!.deliver(liveReasoning("r".repeat(16_384)));
   h.link.open[0]!.deliver(liveText("ok"));
-  await expect.poll(() => h.view.current?.liveText[0]?.text).toBe("t".repeat(16_000) + "ok");
-  expect(h.view.current?.liveReasoning[0]?.text).toBe("r".repeat(48_000));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text.length).toBe(65_536);
+  await expect.poll(() => h.view.current?.liveText[0]?.text).toBe("ok");
+  h.link.open[0]!.deliver(liveReasoning("overflow"));
+  h.link.open[0]!.deliver(liveReasoning("late"));
+  h.link.open[0]!.deliver(liveText("!"));
+  await expect.poll(() => h.view.current?.liveText[0]?.text).toBe("ok!");
+  expect(h.view.current?.liveReasoning[0]?.text).toBe("r".repeat(65_536));
+});
+
+test.each(["reasoning", "text"] as const)("%s has its own 16-key preview cap", async (fullKind) => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  const send = (kind: "reasoning" | "text", n: number, value: string) => {
+    const turnId = `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+    h.link.open[0]!.deliver(kind === "reasoning" ? liveReasoning(value, LIVE_LOOP, turnId) : liveText(value, LIVE_LOOP, turnId));
+  };
+  const otherKind = fullKind === "reasoning" ? "text" : "reasoning";
+  for (let n = 1; n <= 16; n++) send(fullKind, n, "full");
+  send(fullKind, 17, "excluded");
+  send(otherKind, 17, "included");
+  await expect.poll(() => fullKind === "reasoning" ? h.view.current?.liveReasoning.length : h.view.current?.liveText.length).toBe(16);
+  await expect.poll(() => otherKind === "reasoning" ? h.view.current?.liveReasoning[0]?.text : h.view.current?.liveText[0]?.text).toBe("included");
+  const full = fullKind === "reasoning" ? h.view.current!.liveReasoning : h.view.current!.liveText;
+  expect(full.some((preview) => preview.text === "excluded")).toBe(false);
+  h.link.open[0]!.deliver(completed(1, "TurnDone", LIVE_LOOP, `00000000-0000-4000-8000-${String(1).padStart(12, "0")}`));
+  await expect.poll(() => fullKind === "reasoning" ? h.view.current?.liveReasoning.length : h.view.current?.liveText.length).toBe(15);
+  send(fullKind, 17, "still suppressed");
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  const remaining = fullKind === "reasoning" ? h.view.current!.liveReasoning : h.view.current!.liveText;
+  expect(remaining.some((preview) => preview.turnId.endsWith("000000000017"))).toBe(false);
+});
+
+test("reasoning tombstones evict the oldest rejected key beyond 256", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  const turnId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  for (let n = 0; n <= 256; n++) {
+    h.link.open[0]!.deliver(liveReasoning(42, LIVE_LOOP, turnId(n)));
+    if (n % 16 === 15) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  h.link.open[0]!.deliver(liveReasoning("oldest reaccepted", LIVE_LOOP, turnId(0)));
+  h.link.open[0]!.deliver(liveReasoning("newest suppressed", LIVE_LOOP, turnId(256)));
+  await expect.poll(() => h.view.current?.liveReasoning).toEqual([
+    { loopId: LIVE_LOOP, turnId: turnId(0), text: "oldest reaccepted" },
+  ]);
 });
 
 test.each(["StepDone", "TurnDone", "TurnFailed", "TurnInterrupted", "SessionStopped"])(
