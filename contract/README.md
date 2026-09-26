@@ -21,6 +21,17 @@ The TypeScript package mirrors the Factory-facing schema subset and checks each
 mirror and its corresponding fixtures. HostLink schemas remain in this complete
 Core corpus for the byte-for-byte guard; they are not a browser transport API.
 
+## Live preview projection
+
+The live `TokenDelta` body is a Harness public projection inside Core's
+`EphemeralPublication` envelope, not a new vendored Core schema. Harness
+projects text as `{"chunk_type":"text","text":"..."}` and reasoning as
+`{"chunk_type":"thinking","thinking":"..."}`. The client validates both
+with `decodeFactoryLiveDelta`, returning `kind: "text"` or `"reasoning"`.
+`decodeFactoryLiveText` keeps its text-only result. Public session and UUID
+loop/turn identity must match; correlated invalid chunks suppress only their
+own preview kind and key until `StepDone`. Neither kind is durable evidence.
+
 ## Refreshing
 
 ```sh
