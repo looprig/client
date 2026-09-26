@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advanceGateBoardCell, createPublicEventFolder, emptyGateBoardState, foldGateBoard, historyGapStart, historyGapRowIndex, nextTailStart, statusRunning, type PublicGatePage, type PublicJournalEvent } from '../src/index.js';
+import { advanceGateBoardCell, createPublicEventFolder, emptyGateBoardState, foldGateBoard, historyGapStart, historyGapRowIndex, nextTailStart, placeLivePreviews, statusRunning, type PublicGatePage, type PublicJournalEvent } from '../src/index.js';
 
 const SID = '11111111-1111-4111-8111-111111111111';
 const LOOP = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -52,6 +52,23 @@ function durableRows(events: readonly PublicJournalEvent[]) {
 }
 
 describe('Factory conversation view', () => {
+  it('places live reasoning and text after the last visible row for their loop and turn', () => {
+    const rows = [
+      { loopId: LOOP, turnId: uuid(1), journalSeq: 1 },
+      { loopId: LOOP, turnId: uuid(1), journalSeq: 2 },
+      { loopId: uuid(9), turnId: uuid(1), journalSeq: 3 },
+    ];
+    const text = { loopId: LOOP, turnId: uuid(1), text: 'answer' };
+    const reasoning = { loopId: LOOP, turnId: uuid(1), text: 'thinking' };
+    const outside = { loopId: uuid(9), turnId: uuid(1), text: 'other' };
+    const placed = placeLivePreviews(rows, 0, 2, [text, outside], [reasoning]);
+    expect(placed.afterRow.get(1)).toEqual([
+      { ...reasoning, kind: 'reasoning' },
+      { ...text, kind: 'text' },
+    ]);
+    expect(placed.unplaced).toEqual([{ ...outside, kind: 'text' }]);
+  });
+
   it('folds live publications incrementally into the same rows as the durable journal', () => {
     const folder = createPublicEventFolder();
     const first = folder(JOURNAL.slice(0, 3));

@@ -81,6 +81,39 @@ export function historyGapRowIndex(rows: readonly { journalSeq: number | undefin
   return index === -1 ? (rows.length > 0 ? rows.length : undefined) : index;
 }
 
+export interface FactoryLivePreview {
+  readonly kind: 'text' | 'reasoning';
+  readonly loopId: string;
+  readonly turnId: string;
+  readonly text: string;
+}
+
+/** Place each transient preview after its turn's last visible row, or at the tail. */
+export function placeLivePreviews(
+  rows: readonly { readonly loopId: string; readonly turnId: string }[],
+  start: number,
+  end: number,
+  liveText: readonly Omit<FactoryLivePreview, 'kind'>[],
+  liveReasoning: readonly Omit<FactoryLivePreview, 'kind'>[],
+): { readonly afterRow: ReadonlyMap<number, readonly FactoryLivePreview[]>; readonly unplaced: readonly FactoryLivePreview[] } {
+  const lastVisibleRow = new Map<string, number>();
+  for (let index = start; index < end; index++) {
+    const row = rows[index];
+    if (row !== undefined) lastVisibleRow.set(`${row.loopId}\0${row.turnId}`, index);
+  }
+  const afterRow = new Map<number, FactoryLivePreview[]>();
+  const unplaced: FactoryLivePreview[] = [];
+  for (const [kind, previews] of [['reasoning', liveReasoning], ['text', liveText]] as const) {
+    for (const preview of previews) {
+      const item = { ...preview, kind };
+      const index = lastVisibleRow.get(`${preview.loopId}\0${preview.turnId}`);
+      if (index === undefined) unplaced.push(item);
+      else afterRow.set(index, [...(afterRow.get(index) ?? []), item]);
+    }
+  }
+  return { afterRow, unplaced };
+}
+
 /** Status events at or after `start` (all of them when undefined); live events have no sequence and are kept. */
 export function eventsFrom<T extends { journalSeq: number | undefined }>(events: readonly T[], start: number | undefined): readonly T[] {
   if (start === undefined) return events;
@@ -191,4 +224,3 @@ export function advanceGateBoardCell(cell: GateBoardCell | undefined, sessionId:
   const state = foldGateBoard(previous.state, { generation, sessionId, page: view.gates, events: view.events });
   return { sessionId, gates: view.gates, events: view.events, coveredThrough: view.coveredThrough, state };
 }
-
