@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { decodeFactoryLiveText } from "../src/index.js";
+import { decodeFactoryLiveDelta, decodeFactoryLiveText } from "../src/index.js";
 
 const SESSION = "public-session";
 const LOOP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -14,6 +14,27 @@ function body(text: unknown = "hello"): Record<string, unknown> {
 
 test("decodes only a correlated public text delta", () => {
   expect(decodeFactoryLiveText(body(), SESSION)).toStrictEqual({ loopId: LOOP, turnId: TURN, text: "hello" });
+});
+
+test("decodes text and thinking as distinct preview kinds without changing the text API", () => {
+  expect(decodeFactoryLiveDelta(body(), SESSION)).toStrictEqual({ kind: "text", loopId: LOOP, turnId: TURN, text: "hello" });
+  const thinking = { ...body(), chunk: { chunk_type: "thinking", thinking: "because" } };
+  expect(decodeFactoryLiveDelta(thinking, SESSION)).toStrictEqual({ kind: "reasoning", loopId: LOOP, turnId: TURN, text: "because" });
+  expect(decodeFactoryLiveText(thinking, SESSION)).toBeNull();
+});
+
+test.each([
+  ["nonstring", 42], ["empty", ""], ["oversized", "x".repeat(16_385)],
+])("rejects %s thinking for its reasoning key", (_name, thinking) => {
+  expect(decodeFactoryLiveDelta({ ...body(), chunk: { chunk_type: "thinking", thinking } }, SESSION))
+    .toStrictEqual({ kind: "reasoning", rejected: true, loopId: LOOP, turnId: TURN });
+});
+
+test("applies the envelope limit to thinking and ignores unrelated chunks", () => {
+  expect(decodeFactoryLiveDelta({ ...body(), chunk: { chunk_type: "thinking", thinking: "ok" }, padding: "x".repeat(102_401) }, SESSION))
+    .toStrictEqual({ kind: "reasoning", rejected: true, loopId: LOOP, turnId: TURN });
+  expect(decodeFactoryLiveDelta({ ...body(), chunk: { chunk_type: "tool_use", name: "Read" } }, SESSION)).toBeNull();
+  expect(decodeFactoryLiveDelta({ ...body(), session_id: "private", chunk: { chunk_type: "thinking", thinking: "secret" } }, SESSION)).toBeNull();
 });
 
 test("accepts an escape-heavy 16 KiB text chunk", () => {

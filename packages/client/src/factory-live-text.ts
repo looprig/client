@@ -12,6 +12,10 @@ export interface RejectedFactoryLiveText {
   readonly turnId: string;
 }
 
+export type FactoryLiveDelta =
+  | (FactoryLiveText & { readonly kind: "text" | "reasoning" })
+  | (RejectedFactoryLiveText & { readonly kind: "text" | "reasoning" });
+
 /** Host sends at most 4 KiB of text per delta; WUI accepts up to 16 KiB. */
 export const MAX_FACTORY_LIVE_TEXT_CHUNK_BYTES = 16_384;
 // JSON escaping can expand one byte to six, plus a bounded envelope.
@@ -24,20 +28,22 @@ const encoder = new TextEncoder();
  * Unrelated publications return null. A correlated text delta with invalid
  * shape or size returns its key so the caller can stop that preview.
  */
-export function decodeFactoryLiveText(body: unknown, publicSessionId: string): FactoryLiveText | RejectedFactoryLiveText | null {
+export function decodeFactoryLiveDelta(body: unknown, publicSessionId: string): FactoryLiveDelta | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
   const value = body as Record<string, unknown>;
   if (value["v"] !== 1 || value["type"] !== "TokenDelta"
     || typeof value["session_id"] !== "string" || value["session_id"] !== publicSessionId
     || typeof value["loop_id"] !== "string" || !uuid.test(value["loop_id"])
     || typeof value["turn_id"] !== "string" || !uuid.test(value["turn_id"])) return null;
-  const rejected: RejectedFactoryLiveText = {
-    rejected: true, loopId: value["loop_id"], turnId: value["turn_id"],
-  };
   const chunk = value["chunk"];
-  if (typeof chunk !== "object" || chunk === null || Array.isArray(chunk)) return rejected;
+  if (typeof chunk !== "object" || chunk === null || Array.isArray(chunk)) return {
+    kind: "text", rejected: true, loopId: value["loop_id"], turnId: value["turn_id"],
+  };
   const fields = chunk as Record<string, unknown>;
-  if (fields["chunk_type"] !== "text") return null;
+  const kind = fields["chunk_type"] === "text" ? "text"
+    : fields["chunk_type"] === "thinking" ? "reasoning" : null;
+  if (kind === null) return null;
+  const rejected: FactoryLiveDelta = { kind, rejected: true, loopId: value["loop_id"], turnId: value["turn_id"] };
   let encoded: string;
   try {
     encoded = JSON.stringify(body);
@@ -45,7 +51,16 @@ export function decodeFactoryLiveText(body: unknown, publicSessionId: string): F
     return rejected;
   }
   if (encoder.encode(encoded).byteLength > MAX_FACTORY_LIVE_TEXT_BODY_BYTES) return rejected;
-  if (typeof fields["text"] !== "string" || fields["text"] === ""
-    || encoder.encode(fields["text"]).byteLength > MAX_FACTORY_LIVE_TEXT_CHUNK_BYTES) return rejected;
-  return { loopId: value["loop_id"], turnId: value["turn_id"], text: fields["text"] };
+  const text = fields[kind === "text" ? "text" : "thinking"];
+  if (typeof text !== "string" || text === ""
+    || encoder.encode(text).byteLength > MAX_FACTORY_LIVE_TEXT_CHUNK_BYTES) return rejected;
+  return { kind, loopId: value["loop_id"], turnId: value["turn_id"], text };
+}
+
+/** Preserve the v0.5.0 text-only result for existing consumers. */
+export function decodeFactoryLiveText(body: unknown, publicSessionId: string): FactoryLiveText | RejectedFactoryLiveText | null {
+  const delta = decodeFactoryLiveDelta(body, publicSessionId);
+  if (delta === null || delta.kind !== "text") return null;
+  if ("rejected" in delta) return { rejected: true, loopId: delta.loopId, turnId: delta.turnId };
+  return { loopId: delta.loopId, turnId: delta.turnId, text: delta.text };
 }
