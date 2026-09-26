@@ -36,6 +36,7 @@ export function decodeFactoryLiveDelta(body: unknown, publicSessionId: string): 
     || typeof value["loop_id"] !== "string" || !uuid.test(value["loop_id"])
     || typeof value["turn_id"] !== "string" || !uuid.test(value["turn_id"])) return null;
   const chunk = value["chunk"];
+  // Without a classifiable chunk type, preserve 0.1.0 text suppression.
   if (typeof chunk !== "object" || chunk === null || Array.isArray(chunk)) return {
     kind: "text", rejected: true, loopId: value["loop_id"], turnId: value["turn_id"],
   };
@@ -57,7 +58,7 @@ export function decodeFactoryLiveDelta(body: unknown, publicSessionId: string): 
   return { kind, loopId: value["loop_id"], turnId: value["turn_id"], text };
 }
 
-/** Preserve the v0.5.0 text-only result for existing consumers. */
+/** Preserve the v0.1.0 text-only result for existing consumers. */
 export function decodeFactoryLiveText(body: unknown, publicSessionId: string): FactoryLiveText | RejectedFactoryLiveText | null {
   const delta = decodeFactoryLiveDelta(body, publicSessionId);
   if (delta === null || delta.kind !== "text") return null;

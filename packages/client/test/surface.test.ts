@@ -285,7 +285,7 @@ describe("@looprig/client public surface", () => {
       "createFactoryCommands", "createClientLink", "FactoryRestReads", "CapturedTail",
       "fold", "emptySessionView", "createPublicEventFolder", "PendingSlot",
       "createRefreshingFetch", "LinkRecoveryController", "decodeFactoryLiveText",
-      "decodeFactoryLiveDelta", "placeLivePreviews",
+      "decodeFactoryLiveDelta", "placeLivePreviews", "livePreviewKey",
       "ContractValidationError", "validateFactory", "errorFromCoreEnvelope", "textBlock",
       "MessageMetadataError", "MAX_METADATA_FIELDS", "MAX_METADATA_KEY_BYTES",
       "MAX_METADATA_VALUE_BYTES", "MAX_METADATA_BYTES",

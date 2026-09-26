@@ -88,7 +88,17 @@ export interface FactoryLivePreview {
   readonly text: string;
 }
 
-/** Place each transient preview after its turn's last visible row, or at the tail. */
+/** A preview's identity is its kind, loopId and turnId; its text may change. */
+export function livePreviewKey(preview: FactoryLivePreview): string {
+  return `${preview.kind}:${preview.loopId}\0${preview.turnId}`;
+}
+
+/**
+ * Place each transient preview after its turn's last visible row, or at the
+ * visible tail. Its identity is (kind, loopId, turnId): reasoning and text for
+ * the same turn are distinct previews. Unplaced turns retain first-seen order,
+ * with reasoning before text within each turn.
+ */
 export function placeLivePreviews(
   rows: readonly { readonly loopId: string; readonly turnId: string }[],
   start: number,
@@ -102,16 +112,17 @@ export function placeLivePreviews(
     if (row !== undefined) lastVisibleRow.set(`${row.loopId}\0${row.turnId}`, index);
   }
   const afterRow = new Map<number, FactoryLivePreview[]>();
-  const unplaced: FactoryLivePreview[] = [];
+  const unplacedByTurn = new Map<string, FactoryLivePreview[]>();
   for (const [kind, previews] of [['reasoning', liveReasoning], ['text', liveText]] as const) {
     for (const preview of previews) {
       const item = { ...preview, kind };
-      const index = lastVisibleRow.get(`${preview.loopId}\0${preview.turnId}`);
-      if (index === undefined) unplaced.push(item);
+      const turnKey = `${preview.loopId}\0${preview.turnId}`;
+      const index = lastVisibleRow.get(turnKey);
+      if (index === undefined) unplacedByTurn.set(turnKey, [...(unplacedByTurn.get(turnKey) ?? []), item]);
       else afterRow.set(index, [...(afterRow.get(index) ?? []), item]);
     }
   }
-  return { afterRow, unplaced };
+  return { afterRow, unplaced: [...unplacedByTurn.values()].flat() };
 }
 
 /** Status events at or after `start` (all of them when undefined); live events have no sequence and are kept. */

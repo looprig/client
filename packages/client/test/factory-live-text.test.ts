@@ -48,6 +48,16 @@ test("identifies an oversized delta for this session so its key can be suppresse
   });
 });
 
+test("a non-object chunk suppresses the text key as in 0.1.0", () => {
+  const malformed = { ...body(), chunk: 42 };
+  expect(decodeFactoryLiveDelta(malformed, SESSION)).toStrictEqual({
+    kind: "text", rejected: true, loopId: LOOP, turnId: TURN,
+  });
+  expect(decodeFactoryLiveText(malformed, SESSION)).toStrictEqual({
+    rejected: true, loopId: LOOP, turnId: TURN,
+  });
+});
+
 test.each([
   ["nonstring text", body(42)],
   ["oversized envelope", { ...body(), padding: "x".repeat(102_401) }],

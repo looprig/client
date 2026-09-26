@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advanceGateBoardCell, createPublicEventFolder, emptyGateBoardState, foldGateBoard, historyGapStart, historyGapRowIndex, nextTailStart, placeLivePreviews, statusRunning, type PublicGatePage, type PublicJournalEvent } from '../src/index.js';
+import { advanceGateBoardCell, createPublicEventFolder, emptyGateBoardState, foldGateBoard, historyGapStart, historyGapRowIndex, livePreviewKey, nextTailStart, placeLivePreviews, statusRunning, type PublicGatePage, type PublicJournalEvent } from '../src/index.js';
 
 const SID = '11111111-1111-4111-8111-111111111111';
 const LOOP = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -67,6 +67,48 @@ describe('Factory conversation view', () => {
       { ...text, kind: 'text' },
     ]);
     expect(placed.unplaced).toEqual([{ ...outside, kind: 'text' }]);
+  });
+
+  it('identifies a live preview by kind, loop and turn', () => {
+    const preview = { kind: 'text' as const, loopId: LOOP, turnId: uuid(1), text: 'answer' };
+    expect(livePreviewKey({ ...preview, text: 'updated' })).toBe(livePreviewKey(preview));
+    expect(livePreviewKey({ ...preview, kind: 'reasoning' })).not.toBe(livePreviewKey(preview));
+    expect(livePreviewKey({ ...preview, loopId: uuid(2) })).not.toBe(livePreviewKey(preview));
+    expect(livePreviewKey({ ...preview, turnId: uuid(2) })).not.toBe(livePreviewKey(preview));
+  });
+
+  it('groups unplaced previews by turn in first-seen order with reasoning before text', () => {
+    const first = { loopId: LOOP, turnId: uuid(1) };
+    const second = { loopId: LOOP, turnId: uuid(2) };
+    const third = { loopId: uuid(9), turnId: uuid(1) };
+    const placed = placeLivePreviews([], 0, 0,
+      [{ ...second, text: 'second answer' }, { ...first, text: 'first answer' }, { ...third, text: 'third answer' }],
+      [{ ...first, text: 'first thought' }, { ...second, text: 'second thought' }]);
+    expect(placed.unplaced).toEqual([
+      { ...first, kind: 'reasoning', text: 'first thought' },
+      { ...first, kind: 'text', text: 'first answer' },
+      { ...second, kind: 'reasoning', text: 'second thought' },
+      { ...second, kind: 'text', text: 'second answer' },
+      { ...third, kind: 'text', text: 'third answer' },
+    ]);
+  });
+
+  it('leaves reasoning and text unplaced when their row is before the visible start', () => {
+    const hidden = { loopId: LOOP, turnId: uuid(1) };
+    const visible = { loopId: LOOP, turnId: uuid(2) };
+    const rows = [hidden, visible, visible];
+    const placed = placeLivePreviews(rows, 1, 3,
+      [{ ...hidden, text: 'answer' }, { ...visible, text: 'visible answer' }],
+      [{ ...hidden, text: 'thought' }, { ...visible, text: 'visible thought' }]);
+    expect(placed.afterRow.get(0)).toBeUndefined();
+    expect(placed.afterRow.get(2)).toEqual([
+      { ...visible, kind: 'reasoning', text: 'visible thought' },
+      { ...visible, kind: 'text', text: 'visible answer' },
+    ]);
+    expect(placed.unplaced).toEqual([
+      { ...hidden, kind: 'reasoning', text: 'thought' },
+      { ...hidden, kind: 'text', text: 'answer' },
+    ]);
   });
 
   it('folds live publications incrementally into the same rows as the durable journal', () => {
