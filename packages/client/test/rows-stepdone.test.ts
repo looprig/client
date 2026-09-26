@@ -1,50 +1,4 @@
-/**
- * §3b rule 3: "On that loop's `StepDone`, **snap**: discard the live segment
- * and commit from `StepDone.Messages`."
- *
- * The snap is the load-bearing idea. A delta carries no `step_id` (harness's
- * `stampStepID` stamps five event types and `TokenDelta` is not one of them),
- * so the ephemeral accumulation cannot be matched to the enduring commit by any
- * shared key — and does not have to be, because the commit REPLACES it
- * wholesale. That is also the whole of delta/committed deduplication.
- *
- * It repairs an outage too: ephemeral frames carry no `journal_seq` and are
- * never persisted, so a reconnect replays enduring frames only and the deltas
- * emitted during the gap are simply gone. The following `StepDone` restores the
- * step's prose from the durable record.
- *
- * ## Provenance of the wire strings
- *
- * Every `*_WIRE` constant below is the VERBATIM stdout of `event.MarshalEvent`
- * in `github.com/looprig/harness@v0.30.0` — this module's pin, and the version
- * `contract/VERSION` records — driven by a throwaway main constructing real
- * `event.StepDone` values against `core@v0.6.0` / `inference@v0.12.0` (the
- * versions the pin's module graph resolves; a bare `go mod tidy` picks
- * v0.6.1/v0.12.1, which is NOT the pinned wire). They are parsed with
- * JSON.parse, so these tests consume bytes rather than object literals encoding
- * this author's beliefs about the wire.
- *
- * ## What that marshalling proved about the SHAPE of a step group
- *
- * `validateStepDoneMessages` (`pkg/event/validate.go`) runs at the durable
- * write boundary and rejects, with `event: invalid StepDone: Messages is
- * invalid`, every one of: empty/nil `Messages`; a group whose FIRST message is
- * not an `*content.AIMessage`; and a group whose LATER messages are not all
- * `*content.ToolResultMessage`. All five were attempted against the pinned
- * marshaller and all five errored. So:
- *
- *  - a `StepDone` with empty messages CANNOT exist (enforced, not conventional);
- *  - a `UserMessage` can NEVER appear in a step group, in any position — the
- *    plan's "ignores a UserMessage inside the step group" case is an impossible
- *    wire shape, kept below only as a defensive assertion about splitStepGroup;
- *  - a group can carry only ONE AIMessage.
- *
- * A TRUNCATED step DOES emit a StepDone: a lone AIMessage whose last block is a
- * plain TextBlock carrying `TruncatedResponseNotice` /
- * `InterruptedResponseNotice` (harness `internal/loopruntime/truncation.go`) —
- * with NO distinguishing tag, which is exactly why the turn TERMINAL, not this
- * payload, is what tells a truncated group from a clean one.
- */
+/** Durable StepDone projection and content helpers. Captured event-body payloads cover prose, refusal, redacted thinking, and tool expansion. */
 import { describe, expect, it } from "vitest";
 import { emptySessionView } from "../src/fold.js";
 import {
@@ -58,20 +12,7 @@ import {
 } from "../src/rows.js";
 import { decodeMessages, type ContentBlock } from "../src/blocks.js";
 import type { EventEnvelope } from "../src/types.js";
-import {
-  LOOP_A,
-  LOOP_B,
-  TURN_1,
-  aiMessageWire,
-  envelope,
-  history,
-  liveEphemeral,
-  loopStarted,
-  resetSeq,
-  textBlockWire,
-  textDelta,
-  thinkingDelta,
-} from "./helpers.js";
+import { LOOP_A, TURN_1, aiMessageWire, envelope, history, loopStarted, resetSeq, textBlockWire } from "./helpers.js";
 import { run } from "./run.js";
 
 const STEP_ID = "55555555-5555-4555-8555-555555555555";
@@ -238,46 +179,36 @@ describe("rows: the step-group helpers", () => {
   });
 });
 
-describe("rows: the StepDone snap", () => {
-  it("discards the provisional live segment and commits from StepDone.Messages", () => {
-    resetSeq();
-    const view = run(emptySessionView(), [
-      loopStarted(LOOP_A),
-      thinkingDelta("half a th", LOOP_A, TURN_1),
-      textDelta("partial answ", LOOP_A, TURN_1),
-      history(wireEnvelope(STEP_DONE_PROSE_ONLY_WIRE), 11),
-    ]);
-    expect(view.rows).toStrictEqual([
-      {
-        kind: "assistant",
-        // The live row burned ordinal 0 and was discarded; ordinals are never
-        // reused, so the committed row is 1.
-        ordinal: 1,
-        loopId: LOOP_A,
-        turnId: TURN_1,
-        journalSeq: 11,
-        live: false,
-        orphanedLoop: false,
-        thinking: "half a thought",
-        text: "partial answer, finished",
-        refusal: "",
-        redactedThinking: false,
-      },
-    ]);
+describe("rows: durable StepDone projection", () => {
+  it("commits the complete durable prose and thinking row", () => {
+    const view = run(emptySessionView(), [loopStarted(LOOP_A), history(wireEnvelope(STEP_DONE_PROSE_ONLY_WIRE), 11)]);
+    expect(view.rows).toStrictEqual([{
+      kind: "assistant", ordinal: 0, loopId: LOOP_A, turnId: TURN_1,
+      journalSeq: 11, live: false, orphanedLoop: false,
+      thinking: "half a thought", text: "partial answer, finished",
+      refusal: "", redactedThinking: false,
+    }]);
   });
 
-  it("discards the loop's live TOOL rows in the same snap", () => {
-    resetSeq();
-    const view = run(emptySessionView(), [
-      liveEphemeral("tool_call_started", { tool_execution_id: "f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1", tool_name: "Read" }, LOOP_A, TURN_1),
-      textDelta("thinking about it", LOOP_A, TURN_1),
-      history(wireEnvelope(STEP_DONE_PROSE_ONLY_WIRE), 12),
-    ]);
-    expect(view.rows.filter((r) => r.live)).toStrictEqual([]);
-    expect(view.rows.map((r) => r.kind)).toStrictEqual(["assistant"]);
+  it("commits a truncated step exactly like a clean one — the notice is ordinary narration", () => {
+    const view = run(emptySessionView(), [history(wireEnvelope(STEP_DONE_TRUNCATED_WIRE), 6)]);
+    expect(view.rows).toHaveLength(1);
+    expect(view.rows[0]).toMatchObject({
+      kind: "assistant", live: false, journalSeq: 6,
+      text: "partial answ\n[truncated: the stream failed before this reply completed; the content above may be incomplete]",
+    });
   });
 
-  it("still appends the generic StatusEventMarker alongside the snap", () => {
+  it("commits nothing for a messages-less StepDone", () => {
+    // Defensive malformed body: the durable writer rejects an empty Messages.
+    const view = run(emptySessionView(), [history(envelope({ type: "StepDone", loopId: LOOP_A, turnId: TURN_1 }), 9)]);
+    expect(view.rows).toStrictEqual([]);
+    expect(view.nextOrdinal).toBe(0);
+    expect(view.statusEvents).toHaveLength(1);
+  });
+
+
+  it("appends the generic StatusEventMarker alongside durable rows", () => {
     resetSeq();
     const view = run(emptySessionView(), [history(wireEnvelope(STEP_DONE_PROSE_ONLY_WIRE), 11)]);
     expect(view.statusEvents).toHaveLength(1);
@@ -311,25 +242,6 @@ describe("rows: the StepDone snap", () => {
     resetSeq();
     const view = run(emptySessionView(), [history(wireEnvelope(STEP_DONE_PURE_TOOL_WIRE), 4)]);
     expect(view.rows.filter((r) => r.kind === "assistant")).toStrictEqual([]);
-  });
-
-  it("commits a truncated step exactly like a clean one — the notice is ordinary narration", () => {
-    // There is no tag to read: the notice is a TextBlock. A consumer that must
-    // tell the two apart reads the turn TERMINAL (TurnFailed / TurnInterrupted),
-    // which tasks 3.20 and 3.21 project.
-    resetSeq();
-    const view = run(emptySessionView(), [
-      textDelta("partial answ", LOOP_A, TURN_1),
-      history(wireEnvelope(STEP_DONE_TRUNCATED_WIRE), 6),
-    ]);
-    expect(view.rows).toHaveLength(1);
-    expect(view.rows[0]).toMatchObject({
-      kind: "assistant",
-      live: false,
-      journalSeq: 6,
-      text:
-        "partial answ\n[truncated: the stream failed before this reply completed; the content above may be incomplete]",
-    });
   });
 
   it("joins several text blocks in block order rather than keeping only one", () => {
@@ -423,20 +335,6 @@ describe("rows: the StepDone snap", () => {
     expect(view.rows[0]).toMatchObject({ thinking: "half a thought", redactedThinking: false });
   });
 
-  it("snaps only the committing loop, leaving another loop's live segment alone", () => {
-    resetSeq();
-    const view = run(emptySessionView(), [
-      textDelta("child working", LOOP_B, TURN_1),
-      textDelta("parent working", LOOP_A, TURN_1),
-      stepDone(LOOP_A, [textBlockWire("parent done")]),
-    ]);
-    const b = view.rows.find((r) => r.loopId === LOOP_B);
-    expect(b).toMatchObject({ live: true, text: "child working" });
-    expect(view.rows.filter((r) => r.loopId === LOOP_A)).toStrictEqual([
-      expect.objectContaining({ live: false, text: "parent done" }),
-    ]);
-  });
-
   it("multi-step turns render as multiple separate assistant rows, never one merged row", () => {
     resetSeq();
     const view = run(emptySessionView(), [
@@ -456,19 +354,6 @@ describe("rows: the StepDone snap", () => {
     const committed = first.rows[0];
     const second = run(first, [stepDone(LOOP_A, [textBlockWire("two")], 2)]);
     expect(second.rows[0], "an untouched row was re-created, so every card would re-render").toBe(committed);
-  });
-
-  it("commits nothing for a messages-less StepDone, which the durable boundary cannot produce", () => {
-    // validateStepDoneMessages rejects an empty Messages at MarshalEvent, so
-    // this is unreachable from harness; it must still not throw or half-commit.
-    resetSeq();
-    const view = run(emptySessionView(), [
-      textDelta("in flight", LOOP_A, TURN_1),
-      history(envelope({ type: "StepDone", loopId: LOOP_A, turnId: TURN_1 }), 9),
-    ]);
-    // The snap still happens: the live segment belonged to a step that has now
-    // ended, and keeping it would dangle it into the next step.
-    expect(view.rows).toStrictEqual([]);
   });
 });
 
@@ -572,31 +457,5 @@ describe("rows: StepDone tool expansion", () => {
       ["TaskCreate", ""],
     ]);
     expect(JSON.stringify(view.rows)).not.toContain("hello");
-  });
-
-  it("replaces the live card with the committed row rather than showing both", () => {
-    // The dedup the snap solves with no shared key: the live card is keyed by
-    // tool_execution_id, the committed row by ToolUseID, and nothing on the
-    // wire relates the two. Discarding the whole live segment is what makes
-    // that unnecessary.
-    resetSeq();
-    const view = run(emptySessionView(), [
-      liveEphemeral(
-        "tool_call_started",
-        { tool_execution_id: "f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1", tool_name: "Bash", summary: "Bash(ls)" },
-        LOOP_A,
-        TURN_1,
-      ),
-      liveEphemeral(
-        "tool_call_completed",
-        { tool_execution_id: "f1f1f1f1-f1f1-4f1f-8f1f-f1f1f1f1f1f1", result_preview: "capped preview" },
-        LOOP_A,
-        TURN_1,
-      ),
-      history(wireEnvelope(STEP_DONE_PURE_TOOL_WIRE), 24),
-    ]);
-    const tools = view.rows.filter((r) => r.kind === "tool");
-    expect(tools).toHaveLength(1);
-    expect(tools[0]).toMatchObject({ live: false, toolUseId: "toolu_9", toolExecutionId: "", journalSeq: 24 });
   });
 });

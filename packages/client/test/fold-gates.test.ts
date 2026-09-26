@@ -36,16 +36,7 @@ import { acceptsResidentResponse } from "../src/gate-actions.js";
 import { GATE_PROJECTION_WIRE_FIELDS } from "../src/gate.js";
 import type { EventEnvelope, PublicGatePage } from "../src/types.js";
 import { validatePublicGatePage } from "../src/validate.js";
-import {
-  LOOP_A,
-  LOOP_B,
-  SESSION_ID,
-  envelope,
-  history,
-  liveEnduring,
-  liveEphemeral,
-  resetSeq,
-} from "./helpers.js";
+import { LOOP_A, LOOP_B, SESSION_ID, envelope, history, liveEnduring, resetSeq } from "./helpers.js";
 
 const GATE_A = "9e2f0000-0000-4000-8000-00000000000a";
 const GATE_B = "9e2f0000-0000-4000-8000-00000000000b";
@@ -189,7 +180,7 @@ describe("fold: gate state", () => {
     expect(view.gates.get(GATE_A)?.kind).toBe("harness.ask_user");
   });
 
-  it("arrives identically over live SSE and the cold journal", () => {
+  it("arrives identically from a publication body and the cold journal", () => {
     resetSeq();
     const live = run(emptySessionView(), [liveEnduring(gateOpened(GATE_A, LOOP_A))]);
     resetSeq();
@@ -781,17 +772,12 @@ describe("public gate board: cold projections merged with live events", () => {
     expect(publicGates(rebuilt).map((g) => g.gateId)).toStrictEqual([GATE_B]);
   });
 
-  it("leaves the board identical for every input that is not a public gate event", () => {
-    resetSeq();
+  it("preserves board identity for non-gate durable bodies and absent events", () => {
     const board = foldPublicGatePage(emptyPublicGateBoard(), page([gateRecord(GATE_A, 6, "resident")]), SESSION_ID);
     const inputs: FoldInput[] = [
       history(envelope({ type: "TurnDone", loopId: LOOP_A, payload: { turn_index: 1 } })),
       liveEnduring(envelope({ type: "SessionIdle", loopId: LOOP_A })),
-      liveEphemeral("token_delta", { chunk_type: "text", text: "hi" }, LOOP_A),
-      { segment: "live", frame: { type: "heartbeat" } },
-      // NOT REAL WIRE: `event` is optional on enduring_frame.schema.json, so a
-      // frame with none is representable and names no gate and no session.
-      { segment: "live", frame: { type: "enduring", journalSeq: 3, data: {} as never } },
+      { segment: "history", event: { journal_seq: 3 } },
     ];
     for (const input of inputs) expect(foldPublicGateEvent(board, input)).toBe(board);
   });

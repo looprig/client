@@ -1,5 +1,5 @@
 /**
- * Drives `fold` over a list of inputs, failing loudly on the first FoldError.
+ * Drives `fold` over a list of inputs, failing loudly on the first error.
  *
  * It lives in its own module rather than in a `*.test.ts` so the row test
  * files can share it without importing one test file from another — an import
@@ -12,7 +12,7 @@ export function run(view: SessionView, inputs: FoldInput[]): SessionView {
   for (const input of inputs) {
     const result = fold(out, input);
     if (!result.ok) {
-      throw new Error(`fold rejected an input: FoldError(${result.error.reason}): ${result.error.message}`);
+      throw new Error(`fold rejected an input: ${result.error.message}`);
     }
     out = result.view;
   }

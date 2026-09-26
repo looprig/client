@@ -279,91 +279,36 @@ describe("@looprig/client public surface", () => {
     }
   });
 
-  it("exports the store and its scheduler seam", () => {
-    expect(protocol).toHaveProperty("SessionViewStore");
-    expect(protocol).toHaveProperty("FactorySessionViewStore");
-    expect(protocol).toHaveProperty("joinFactorySessionView");
-    expect(protocol).toHaveProperty("browserFrameScheduler");
-  });
-
-  it("exports the live-queue bound and its drop policy", () => {
-    // Not a `boundedLiveSource` wrapper: the backlog forms inside join's own
-    // queue, downstream of any wrapper around the source, so the bound and the
-    // policy live there. See test/store-backpressure.test.ts.
-    expect(protocol).toHaveProperty("selectFrameToDrop");
-    expect(protocol.DEFAULT_MAX_QUEUED_FRAMES).toBe(512);
-  });
-
-  it("exports the fold surface, including the optimistic pending row", () => {
-    expect(protocol).toHaveProperty("fold");
-    expect(protocol).toHaveProperty("emptySessionView");
-    expect(protocol).toHaveProperty("addPendingRow");
-    expect(protocol).toHaveProperty("FoldError");
-    expect(protocol).toHaveProperty("joinSessionView");
-  });
-
-  it("exports the live SSE source", () => {
-    expect(protocol).toHaveProperty("createFetchLiveFrameSource");
-    expect(protocol).toHaveProperty("parseSseStream");
-    expect(protocol).toHaveProperty("SseFrameParser");
-    expect(protocol).toHaveProperty("SseFrameError");
-    expect(protocol).toHaveProperty("MAX_BUFFERED_LINE_BYTES");
-  });
-
-  it("still exports every capability the copied sdk/core surface had", () => {
-    // Two of these were RENAMED, not added: the copy's `BFFTransport` /
-    // `createBFFClient` are this package's `HostTransport` /
-    // `createHostTransport`. wui has no backend-for-frontend — the process
-    // serving the SPA is the process holding the rig — so the browser
-    // transport talks same-origin `/v1/...` to wui's own handler, and
-    // 00-plan.md §2 names the factory `createHostTransport`. The capability
-    // (a browser transport, CSRF-carrying, reachable from a factory) is what
-    // this test guards; the copy's spelling of it is not.
+  it("exports the Factory transport, join, controllers and durable fold", () => {
     for (const name of [
-      "HostTransport",
-      "ServeTransport",
-      "createClient",
-      "createFactoryClient",
-      "createFactoryCommands",
-      "MessageMetadataError",
-      "MAX_METADATA_FIELDS",
-      "MAX_METADATA_KEY_BYTES",
-      "MAX_METADATA_VALUE_BYTES",
-      "MAX_METADATA_BYTES",
-      "createClientLink",
-      "FactoryRestReads",
-      "createHostTransport",
-      "CSRF_TOKEN_HEADER",
-      "generateIdempotencyKey",
-      "SseFrameParser",
-      "parseSseStream",
-      "validate",
-      "ContractValidationError",
-      "errorFromResponse",
-      "textBlock",
-    ]) {
-      expect(protocol, `regressed export: ${name}`).toHaveProperty(name);
-    }
+      "FactorySessionViewStore", "joinFactorySessionView", "createFactoryClient",
+      "createFactoryCommands", "createClientLink", "FactoryRestReads", "CapturedTail",
+      "fold", "emptySessionView", "createPublicEventFolder", "PendingSlot",
+      "createRefreshingFetch", "LinkRecoveryController", "decodeFactoryLiveText",
+      "ContractValidationError", "validateFactory", "errorFromCoreEnvelope", "textBlock",
+      "MessageMetadataError", "MAX_METADATA_FIELDS", "MAX_METADATA_KEY_BYTES",
+      "MAX_METADATA_VALUE_BYTES", "MAX_METADATA_BYTES",
+    ]) expect(protocol, `missing export: ${name}`).toHaveProperty(name);
   });
 
-  it("exports every schema the validators are compiled from", () => {
-    expect(protocol).toHaveProperty("allSchemas");
-    // `allSchemas` is keyed by the vendored FILE name (snake_case); the barrel
-    // exports each one under its camelCase binding.
-    const camel = (name: string): string => name.replace(/_(.)/g, (_, c: string) => c.toUpperCase());
-    for (const name of Object.keys(protocol.allSchemas)) {
-      expect(protocol, `schema missing from the barrel: ${camel(name)}Schema`).toHaveProperty(
-        `${camel(name)}Schema`,
-      );
+  it("does not expose the removed serve transport, schemas or fold helpers", () => {
+    for (const name of [
+      "HostTransport", "ServeTransport", "ThreadReconnectTransport", "createHostTransport",
+      "createClient", "restoreSession", "CSRF_TOKEN_HEADER", "generateIdempotencyKey",
+      "SseFrameParser", "SseFrameError", "parseSseStream", "createFetchLiveFrameSource",
+      "SessionViewStore", "joinSessionView", "selectFrameToDrop", "browserFrameScheduler",
+      "ephemeralDropKey", "isDroppableFrame", "addPendingRow", "FoldError",
+      "allSchemas", "bffErrorResponseSchema", "validateBFFErrorResponse", "validate",
+      "restoreResponseSchema", "validateRestoreResponse", "errorFromResponse", "LooprigError",
+    ]) expect(protocol, `legacy export leaked: ${name}`).not.toHaveProperty(name);
+  });
+
+  it("exports the Core schemas its Factory validators use", () => {
+    const camel = (name: string): string => name.replace(/(^|_)(.)/g, (_, _prefix: string, c: string) => c.toUpperCase());
+    for (const name of Object.keys(protocol.factorySchemas)) {
+      expect(protocol).toHaveProperty(`factory${camel(name)}Schema`);
     }
-    // The BFF error envelope has a validator on the barrel, so its schema must
-    // be there too or the pair is inconsistent.
-    expect(protocol).toHaveProperty("bffErrorResponseSchema");
-    expect(protocol).toHaveProperty("validateBFFErrorResponse");
-    for (const name of ["factoryCreateRequestSchema", "factoryInputRequestSchema", "factoryInterruptRequestSchema",
-      "factoryRestoreRequestSchema", "factoryGateResponseRequestSchema", "factoryPrincipalSchema"]) {
-      expect(protocol, `Factory schema missing from the barrel: ${name}`).toHaveProperty(name);
-    }
+    expect(Object.values(protocol.factorySchemas).every((schema) => schema.$id.startsWith("https://looprig.dev/sessionwire/v1/"))).toBe(true);
   });
 
   it("keeps the package's internal decode helpers OFF the public surface", () => {
@@ -757,7 +702,7 @@ describe("@looprig/client public surface", () => {
     }
     // 30 s was under the real cost of this case: a protocol build, an npm
     // pack, a consumer `npm install`, a consumer tsc and a node run — measured
-    // at ~52 s of work on this host, so the cap failed the whole known-drift
+    // at ~52 s of work on this host, so the cap failed the whole test
     // gate for machine speed rather than for drift. A per-test cap cannot be
     // raised from the CLI, so it is raised here.
   }, 300_000);

@@ -34,20 +34,10 @@
  * carry a LoopStarted for its primary loop.
  */
 import { describe, expect, it } from "vitest";
-import { emptySessionView, fold } from "../src/fold.js";
+import { emptySessionView } from "../src/fold.js";
 import { anchorOf } from "../src/rows.js";
 import type { EventEnvelope } from "../src/types.js";
-import {
-  LOOP_A,
-  LOOP_B,
-  ZERO_UUID,
-  aiMessageWire,
-  envelope,
-  history,
-  resetSeq,
-  textBlockWire,
-  textDelta,
-} from "./helpers.js";
+import { LOOP_A, LOOP_B, ZERO_UUID, aiMessageWire, envelope, history, resetSeq, textBlockWire } from "./helpers.js";
 import { run } from "./run.js";
 
 /** A tool-spawned child: cause names the parent loop/turn/step, plus the anchor id. */
@@ -253,24 +243,6 @@ describe("rows: the orphaned-LoopStarted fallback", () => {
     expect(rows[0]?.orphanedLoop).toBe(true);
   });
 
-  it("marks an unobserved loop's LIVE rows orphaned too", () => {
-    resetSeq();
-    const view = run(emptySessionView(), [textDelta("streaming", LOOP_B)]);
-    expect(view.rows.map((r) => [r.live, r.orphanedLoop])).toStrictEqual([[true, true]]);
-  });
-
-  it("un-orphans a loop's rows when its LoopStarted arrives later in the same replay", () => {
-    resetSeq();
-    const view = run(emptySessionView(), [
-      step(LOOP_B, "child work", 7),
-      textDelta("streaming", LOOP_B),
-      history(wireEnvelope(CHILD_WIRE), 8),
-    ]);
-    expect(view.loops.get(LOOP_B)?.observed).toBe(true);
-    expect(view.rows.filter((r) => r.loopId === LOOP_B)).toHaveLength(2);
-    expect(view.rows.every((r) => !r.orphanedLoop)).toBe(true);
-  });
-
   it("un-orphans ONLY the loop the LoopStarted names", () => {
     resetSeq();
     const other = "99999999-9999-4999-8999-999999999999";
@@ -294,26 +266,6 @@ describe("rows: the orphaned-LoopStarted fallback", () => {
     expect(view.rows[0], "an unrelated row was re-created, so every card re-renders").toBe(rootRow);
     expect(view.rows[1], "the un-orphaned row must be a NEW object").not.toBe(childRow);
     expect(childRow?.orphanedLoop, "the old row object was written through").toBe(true);
-  });
-
-  it("never marks a loop orphaned once its own LoopStarted has been observed", () => {
-    resetSeq();
-    const view = run(emptySessionView(), [
-      history(wireEnvelope(ROOT_WIRE), 0),
-      step(LOOP_A, "root work", 3),
-      textDelta("streaming", LOOP_A),
-    ]);
-    expect(view.rows).toHaveLength(2);
-    expect(view.rows.every((r) => !r.orphanedLoop)).toBe(true);
-  });
-
-  it("leaves a session-scoped row (no loop) out of the loop tree entirely", () => {
-    resetSeq();
-    // "" is the loop id an optimistic pending row and a session-scoped frame
-    // both carry; registering it would invent a loop that never existed.
-    const view = run(emptySessionView(), [textDelta("streaming")]);
-    expect(view.loops.size).toBe(0);
-    expect(view.rows[0]?.orphanedLoop).toBe(false);
   });
 
   it("copies the loops map when a NEW loop is registered", () => {
@@ -345,17 +297,23 @@ describe("rows: the orphaned-LoopStarted fallback", () => {
     ).toBe(false);
     expect(after.loops.get(LOOP_B)?.observed).toBe(true);
   });
+});
 
-  it("leaves the loop tree untouched on a failed fold", () => {
-    resetSeq();
-    const view = run(emptySessionView(), [step(LOOP_A, "root work", 1)]);
-    const loops = view.loops;
-    const result = fold(view, {
-      segment: "live",
-      frame: { type: "ephemeral", data: { kind: "token_delta", delta: { chunk_type: "nope" } } } as never,
-    });
-    expect(result.ok).toBe(false);
-    expect(view.loops).toBe(loops);
-    expect(view.loops.size).toBe(1);
-  });
+it("un-orphans durable rows when their LoopStarted arrives later", () => {
+  const view = run(emptySessionView(), [step(LOOP_B, "child work", 7), history(wireEnvelope(CHILD_WIRE), 8)]);
+  expect(view.loops.get(LOOP_B)?.observed).toBe(true);
+  expect(view.rows).toHaveLength(1);
+  expect(view.rows.every((row) => !row.orphanedLoop)).toBe(true);
+});
+
+it("keeps durable rows non-orphaned after their LoopStarted has been observed", () => {
+  const view = run(emptySessionView(), [history(wireEnvelope(ROOT_WIRE), 0), step(LOOP_A, "root work", 3)]);
+  expect(view.rows).toHaveLength(1);
+  expect(view.rows[0]?.orphanedLoop).toBe(false);
+});
+
+it("does not invent a loop for a durable body with no loop coordinate", () => {
+  const view = run(emptySessionView(), [history(envelope({ type: "StepDone", payload: { messages: [aiMessageWire([textBlockWire("unscoped")])] } }))]);
+  expect(view.loops.size).toBe(0);
+  expect(view.rows[0]?.orphanedLoop).toBe(false);
 });

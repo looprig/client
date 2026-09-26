@@ -17,17 +17,7 @@
 import { describe, expect, it } from "vitest";
 import { emptySessionView, type SessionView } from "../src/fold.js";
 import { loopIdsInOrder, rowsForLoop, type TranscriptRow } from "../src/rows.js";
-import {
-  LOOP_A,
-  LOOP_B,
-  aiMessageWire,
-  envelope,
-  history,
-  resetSeq,
-  textBlockWire,
-  textDelta,
-  userMessageWire,
-} from "./helpers.js";
+import { LOOP_A, LOOP_B, aiMessageWire, envelope, history, resetSeq, textBlockWire, userMessageWire } from "./helpers.js";
 import { run } from "./run.js";
 
 /** One committed assistant row for `loopId`, at an explicit journal_seq. */
@@ -128,35 +118,6 @@ describe("rows: loop partitioning", () => {
     resetSeq();
     const view = run(emptySessionView(), [step(LOOP_A, "second", 20), step(LOOP_A, "first", 10)]);
     expect(rowsForLoop(view, LOOP_A).map(textOf)).toStrictEqual(["first", "second"]);
-  });
-
-  it("places live rows (no journal_seq) after every committed row of the loop", () => {
-    resetSeq();
-    const view = run(emptySessionView(), [
-      step(LOOP_A, "committed", 10),
-      textDelta("streaming", LOOP_A),
-    ]);
-    const rows = rowsForLoop(view, LOOP_A);
-    expect(rows.map(textOf)).toStrictEqual(["committed", "streaming"]);
-    expect(rows.at(-1)).toMatchObject({ live: true, journalSeq: undefined });
-  });
-
-  it("orders a live row after a committed row that arrived LATER in the array", () => {
-    resetSeq();
-    // The live row is appended FIRST, so plain array order would put it first.
-    // The committing event is a TurnStarted rather than a StepDone: a StepDone
-    // snaps its loop's live segment away, so it could not express this case.
-    const view = run(emptySessionView(), [
-      textDelta("streaming", LOOP_A),
-      step(LOOP_B, "unrelated", 5),
-    ]);
-    const withLate = run(view, [userTurn(LOOP_A, "committed", 99)]);
-    expect(withLate.rows.map(textOf), "the fixture must append the live row first").toStrictEqual([
-      "streaming",
-      "unrelated",
-      "committed",
-    ]);
-    expect(rowsForLoop(withLate, LOOP_A).map(textOf)).toStrictEqual(["committed", "streaming"]);
   });
 
   it("returns an empty list for a loop that produced no rows", () => {

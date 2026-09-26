@@ -1,43 +1,6 @@
-/**
- * The transcript row projection: the row shape, the ordinal, and §3b's first
- * commit rule.
- *
- * `SessionView.content` and `SessionView.toolCalls` are separate append-only
- * buckets with NO shared ordering key, so "text -> tool call -> text within a
- * turn" cannot be reconstructed from them: the interleaving is lost the moment
- * two updates land in different arrays. `rows` is ONE append-only array with a
- * monotonic ordinal, folded from the same inputs, so cross-bucket arrival
- * order survives.
- *
- * ## Provenance of the wire strings below
- *
- * `contract/fixtures/` carries exactly two enduring envelopes, a TurnDone and a
- * StepDone, so TurnStarted and TurnFoldedInto have NO vendored fixture at all.
- * Every `*_WIRE` constant here is therefore the VERBATIM stdout of
- * `event.MarshalEvent` in `github.com/looprig/harness@v0.30.0` — this module's
- * pin, and the version `contract/VERSION` records — driven by a throwaway main
- * that constructed real `event.TurnStarted` / `event.TurnFoldedInto` values
- * against `core@v0.6.0` / `inference@v0.12.0` (the versions the pin's module
- * graph resolves; a bare `go mod tidy` picks v0.6.1/v0.12.1, which is NOT the
- * pinned wire). They are parsed with JSON.parse, so these tests consume bytes
- * rather than JS object literals encoding this author's beliefs about the wire.
- *
- * ## Both spellings of a zero cause loop id are real
- *
- * `identity.Cause` tags every id `omitzero` and `event.Header` tags the whole
- * `Cause` `omitzero`, so PRODUCTION omits a zero id and omits `cause` entirely
- * when nothing in it is set (TURN_STARTED_ZERO_CAUSE_WIRE below is exactly
- * that, straight from the marshaller). The vendored fixtures spell the zero
- * OUT anyway, because harness's `pkg/serve/fixtures_test.go` normalises its
- * golden bodies with `uuidRE.ReplaceAll(b, []byte(zeroUUID))` — a REPLACEMENT,
- * so the key survives with an all-zeros value.
- * TURN_STARTED_HANDBACK_NORMALIZED_WIRE is a real hand-back event put through
- * that exact normaliser, and it is the form a gate written as
- * `cause?.loop_id === undefined` mis-classifies: it would commit no user row
- * for an event whose cause loop id reads as zero.
- */
+/** Shared durable transcript rows and their ordering and identity contract. */
 import { describe, expect, it } from "vitest";
-import { emptySessionView, fold } from "../src/fold.js";
+import { emptySessionView } from "../src/fold.js";
 import type { EventEnvelope } from "../src/types.js";
 import { LOOP_A, envelope, history, liveEnduring, loopStarted, resetSeq, textBlockWire, userMessageWire } from "./helpers.js";
 import { run } from "./run.js";
@@ -228,7 +191,7 @@ describe("rows: copy-on-write", () => {
     // frozen object throws in module (strict) code, so this catches an in-place
     // row update even when it writes a value EQUAL to the one already there —
     // which a deep-compare snapshot cannot. Every later task that "updates" a
-    // row (completing a tool card, extending the live segment) must replace the
+    // row (for example, linking a late loop anchor) must replace the
     // object; this is the assertion that stops it writing through instead.
     resetSeq();
     const first = run(emptySessionView(), [history(wireEnvelope(TURN_STARTED_USER_WIRE), 1)]);
@@ -236,15 +199,5 @@ describe("rows: copy-on-write", () => {
     const second = run(first, [history(wireEnvelope(TURN_STARTED_USER_WIRE), 2)]);
     expect(second.rows).toHaveLength(2);
     expect(second.rows[0]).toBe(first.rows[0]);
-  });
-
-  it("leaves rows untouched on a failed fold", () => {
-    resetSeq();
-    const view = run(emptySessionView(), [history(wireEnvelope(TURN_STARTED_USER_WIRE), 1)]);
-    const rows = view.rows;
-    const result = fold(view, { segment: "live", frame: { type: "ephemeral", data: { kind: "token_delta" } } as never });
-    expect(result.ok).toBe(false);
-    expect(view.rows).toBe(rows);
-    expect(view.rows).toHaveLength(1);
   });
 });

@@ -1,29 +1,9 @@
 /**
- * Per-type decoding of the ENDURING event payloads.
- *
- * Before this module, fold.ts folded every enduring envelope into one opaque
- * StatusEventMarker, so opening a session that already ran rendered a blank
- * transcript: the prose lives in StepDone.Messages and TurnDone.Message,
- * inside that payload. fold.ts's own module comment names this as the
- * intended extension point:
- *
- *   "When gate payloads get a real vendored schema, `StatusEventMarker` is the
- *    natural extension point (a `kind`-specific case alongside the generic
- *    fallback, mirroring how `foldEphemeral` is structured), not a redesign."
- *
- * This is that extension. The payload is not opaque ON THE WIRE — MarshalEvent
- * merges the full type-specific payload into the envelope as sibling keys
- * (mergeEnvelope in harness/pkg/event/marshal.go) and the journal replays
- * those bytes verbatim — so these decoders document an existing durable
- * contract rather than inventing one. Per-type JSON Schemas are authored in
- * harness (design §8) and vendored into wui/contract/; the fixtures are
- * validated against them by the contract suite, not here.
- *
- * The long tail (ContextMeasured, hustle and workflow events) is deliberately
- * NOT decoded: it keeps the generic `other` payload, exactly as before.
+ * Decode typed durable event bodies shared by Factory reads and publications.
+ * Core transports these bodies opaquely; known Harness event kinds project
+ * message, gate and loop data while unknown kinds retain their full envelope.
  */
 import type { EventEnvelope } from "./types.js";
-import type { SseFrame } from "./sse.js";
 import { decodeMessage, decodeMessages, isRecord, str, type ConversationMessage } from "./blocks.js";
 import { decodeGate, type Gate } from "./gate.js";
 import { toolResultCaptures, type ToolResultCaptureSummary } from "./toolsummary.js";
@@ -40,10 +20,8 @@ const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
  * ORDINARY production encoding of a zero id is an ABSENT KEY, not "000…0".
  *
  * The all-zeros spelling is real anyway. harness's own
- * pkg/serve/fixtures_test.go normalises its golden bodies with a regexp that
- * REPLACES every uuid with the zero uuid, so the fixtures vendored into
- * wui/contract/ carry the key with a spelled-out zero value. Both forms are
- * in this repo, in the same file, and both mean the same thing.
+ * historic golden payloads normalized UUIDs to the zero spelling. Durable
+ * decoders continue accepting both absent IDs and the explicit zero value.
  *
  * "" is accepted as well, because decodeEnduring below projects an absent id
  * onto "" — a caller reading `decoded.causeLoopId` never sees `undefined`.
@@ -148,8 +126,8 @@ export interface TurnOpenerPayload {
  *
  * A step that decoded nothing usable emits NO StepDone at all — and that is
  * enforced, not merely conventional: MarshalEvent refuses a StepDone with an
- * empty Messages (validateStepDoneMessages). This is why the turn terminals
- * must commit any dangling live segment themselves.
+ * empty Messages (validateStepDoneMessages). A terminal may therefore arrive
+ * without a corresponding durable step row.
  *
  * The AIMessage's own `usage` key is inside these messages on the wire and is
  * deliberately dropped by decodeMessage; turn accounting reads TurnDone's
@@ -238,9 +216,8 @@ export interface TurnInterruptedPayload {
 
 /**
  * The Enduring Reply event for a UserInput the loop refused. Enduring exactly
- * because a rejected user message must never silently vanish: §3b drops the
- * optimistic pending row (paired by Header.Cause.CommandID) and commits an
- * error notice carrying this reason.
+ * because a rejected user message must never silently vanish: the fold records
+ * a command outcome and commits an error notice carrying this reason.
  *
  * event.RejectReason is a bare uint8 with no symbolic encoding, so `reason` is
  * the raw number and `reasonText` is this module's rendering of it.
@@ -419,7 +396,7 @@ export interface LoopStartedPayload {
 
 /**
  * GateOpened is the PUBLIC activation event: it carries the whole public gate
- * envelope and no private payload, it fans out to SSE AND lands in the journal,
+ * envelope and no private payload, it reaches the public journal and publication stream,
  * and it is what makes a gate listable and answerable. Nothing polls for it —
  * see gate.ts's module comment for why GET /status's waiting_gate_id is not an
  * alternative.
@@ -736,76 +713,4 @@ export function rejectReasonText(reason: number): string {
     default:
       return "an unspecified reason";
   }
-}
-
-// --- Frame classes: what backpressure may drop, and what it may not ----------
-
-/**
- * The frame classes, as a pair of TYPES rather than a convention.
- *
- * This lives in `enduring.ts` because it is the same distinction this module
- * already exists to make: an enduring event is durable, sequenced content whose
- * loss has no in-band repair, and everything decoded above is exactly that
- * content. Backpressure needs the distinction as a value-level predicate and as
- * a type, so both are stated here, once, next to the definition they enforce.
- *
- * `DroppableFrame` is what a bounded live queue may evict:
- *
- *  - `heartbeat` — a keepalive carrying no content at all;
- *  - `ephemeral` — unsequenced best-effort deltas. Losing one is ALREADY a
- *    tolerated condition: a reconnect replays enduring frames only, so deltas
- *    emitted during an outage are lost regardless, and the following `StepDone`
- *    snaps the live segment wholesale and repairs the transcript (design §9).
- *
- * Everything else — `enduring`, and `error` — is outside that domain.
- * `enduring` because there is no repair short of re-reading the journal, and
- * `error` because a frame that FAILED TO PARSE may have been an enduring one
- * and nothing can tell after the fact; dropping it would lose durable content
- * with no report that it happened. Both are refused, and the refusal is
- * reported as a binding-level `repair_required` (see store.ts).
- *
- * The type is what `selectFrameToDrop` takes, so no TypeScript call site can
- * hand the eviction policy a frame outside the domain. That is enforced by
- * `npm run typecheck` (which compiles `test/` too) and by nothing else: types
- * are erased, so widening the parameter back to `SseFrame` leaves every runtime
- * test passing — measured, not assumed.
- *
- * The runtime half is `selectFrameToDrop` returning -1 rather than an index for
- * a buffer with no droppable frame in it, which is what makes the queue repair.
- * `AsyncQueue` also re-checks `isDroppableFrame` on the exact item it is about
- * to splice, but that condition is unreachable with the module's own wiring —
- * see the note at that line for why it is kept anyway.
- */
-export type DroppableFrame = Extract<SseFrame, { type: "heartbeat" } | { type: "ephemeral" }>;
-
-/** The one narrowing predicate. Everything not named here is durable. */
-export function isDroppableFrame(frame: SseFrame): frame is DroppableFrame {
-  return frame.type === "heartbeat" || frame.type === "ephemeral";
-}
-
-/**
- * The DECLARED coalescing key of a droppable frame: the `kind` the producer
- * put on the wire (`ephemeral_frame.schema.json`'s five-value enum —
- * `token_delta`, `tool_call_started`, `tool_call_completed`, `input_queued`,
- * `compaction_started`) plus the producing event's identity from `header`.
- *
- * It is the DECLARED kind, never an inference from the payload: two
- * `token_delta` frames on one loop share a key however different their text is,
- * and a `token_delta` never shares a key with a `tool_call_started` on the same
- * loop. That is what makes eviction coalescing rather than truncation — one
- * fast token stream is thinned against itself, and a quiet peer stream on
- * another loop is not charged for it.
- *
- * A frame whose `kind` or `header` is missing or malformed keys as its own
- * `"ephemeral"` bucket rather than throwing: it is still droppable (its TYPE
- * said so), and an unkeyable frame must not be able to make the queue give up.
- */
-export function ephemeralDropKey(frame: DroppableFrame): string {
-  if (frame.type === "heartbeat") return "heartbeat";
-  const raw = frame.data as unknown;
-  const data: Record<string, unknown> = isRecord(raw) ? raw : {};
-  const kind = str(data["kind"]);
-  if (kind === "") return "ephemeral";
-  const header: Record<string, unknown> = isRecord(data["header"]) ? data["header"] : {};
-  return `${kind}|${str(header["loop_id"])}|${str(header["turn_id"])}|${str(header["step_id"])}`;
 }

@@ -7,11 +7,9 @@
  *
  * ## Provenance of the wire strings below
  *
- * The vendored fixtures reach messages exactly once: `status_running.json`'s
- * `last_step.event.messages` is `[{"role":"assistant"}]`. That one really is
- * decoded here, from the file — it is the committed proof that `role` is
- * snake_case and that `blocks` is omitempty-absent on a real StepDone. It
- * carries no blocks, so it cannot pin anything below it.
+ * Core's public journal/publication fixtures have opaque message-free bodies.
+ * Their absence of a typed messages field is checked below; concrete message
+ * shapes are tested separately with captured payload bytes.
  *
  * The POSITIVE cases below are therefore the VERBATIM output of `json.Marshal`
  * over a `content.AgenticMessages` in `github.com/looprig/core@v0.6.0` — the
@@ -176,15 +174,17 @@ describe("decodeMessage", () => {
 });
 
 describe("decodeMessages", () => {
-  it("decodes the real status_running.json fixture's StepDone messages", () => {
-    const status = readFixtureJson("status_running.json") as {
-      last_step: { event: { messages: unknown } };
-    };
-    // Guard the path itself: if the fixture stops carrying messages this test
-    // must fail loudly, not quietly assert [] against nothing.
-    expect(Array.isArray(status.last_step.event.messages)).toBe(true);
-    expect(status.last_step.event.messages).toHaveLength(1);
-    expect(decodeMessages(status.last_step.event.messages)).toEqual([
+  it("does not invent typed messages for opaque Core public bodies", () => {
+    const page = readFixtureJson("public_journal_page.json") as { events: { body: Record<string, unknown> }[] };
+    const publication = readFixtureJson("enduring_publication.json") as { body: Record<string, unknown> };
+    for (const body of [...page.events.map((event) => event.body), publication.body]) {
+      expect(body).not.toHaveProperty("messages");
+      expect(decodeMessages(body["messages"])).toEqual([]);
+    }
+  });
+
+  it("decodes an explicit blockless assistant message", () => {
+    expect(decodeMessages(wire('[{"role":"assistant"}]'))).toEqual([
       { role: "assistant", blocks: [], toolUseId: "", isError: false },
     ]);
   });

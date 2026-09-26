@@ -10,7 +10,7 @@ function foldAll(inputs: FoldInput[]): SessionView {
   let view = emptySessionView();
   for (const input of inputs) {
     const result = fold(view, input);
-    if (!result.ok) throw new Error(`fold failed: ${result.error.reason}: ${result.error.message}`);
+    if (!result.ok) throw new Error(`fold failed: ${result.error.message}`);
     view = result.view;
   }
   return view;

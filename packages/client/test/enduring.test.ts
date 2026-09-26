@@ -1,34 +1,6 @@
-/**
- * The enduring payload dispatch, and the zero-UUID rule the whole §3b user-row
- * gate rests on.
- *
- * ## Both wire spellings of a zero id are real, and both are in this repo
- *
- * `identity.Coordinates` and `identity.Cause` tag every id `omitzero`, and
- * `event.Header` tags the whole `Cause` struct `omitzero` as well (verified in
- * harness@v0.30.0's `pkg/identity/identifier_types.go` and `pkg/event/event.go`,
- * the version `contract/VERSION` pins). `uuid.UUID` is `[16]byte`, so its zero
- * value is the zero array and `omitzero` really does drop the key. PRODUCTION
- * therefore OMITS a zero id, and omits `cause` entirely when nothing in it is
- * set.
- *
- * The vendored fixtures spell the zero OUT anyway. harness's own
- * `pkg/serve/fixtures_test.go` drives the real handlers with real NON-zero ids
- * and then normalises the bodies with `uuidRE.ReplaceAll(b, []byte(zeroUUID))`
- * — a REPLACEMENT, so every key survives and its value becomes "000…0".
- *
- * Both forms consequently appear in one file: `journal_page.json`'s TurnDone
- * carries `"loop_id":"00000000-…"` spelled out, carries no `step_id` key at
- * all, and carries no `cause` key at all. Every claim about the two forms below
- * is READ OUT OF THOSE BYTES rather than written as a literal — a literal would
- * only re-assert the author's belief about the wire, which is exactly the
- * failure mode this task exists to avoid.
- *
- * Why it matters past cosmetics: §3b commits a user row only when
- * `Header.Cause.LoopID` is zero, and a non-zero cause loop id is a subagent
- * hand-back that must commit NO row. `cause.loop_id === undefined` alone passes
- * every hand-written case in this file and then mis-classifies the fixture,
- * rendering a phantom user message on every hand-back.
+/** Durable event decoding and zero-UUID handling.
+ * Core public bodies are opaque: current Core payloads cover unknown bodies;
+ * typed Harness event-body cases below use explicit payloads and captured bytes.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -62,31 +34,26 @@ function wireId(raw: Record<string, unknown>, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-/** `journal_page.json`'s single TurnDone envelope, straight from the file. */
-function fixtureTurnDone(): Record<string, unknown> {
-  const page = object(readFixtureJson("journal_page.json"));
-  const events = page["events"];
-  if (!Array.isArray(events) || events.length !== 1) {
-    throw new Error(`journal_page.json: expected exactly one event, got ${JSON.stringify(events)}`);
-  }
-  return object(object(events[0])["event"]);
+/** Deliberate payload edge case: explicit zero coordinates and omitted cause. */
+function sampleTurnDone(): Record<string, unknown> {
+  return { type: "TurnDone", v: 1, loop_id: ZERO_UUID, turn_id: ZERO_UUID,
+    event_id: ZERO_UUID, created_at: "2026-07-08T12:00:00Z", turn_index: 1 };
 }
 
-/** `status_running.json`'s `last_step` StepDone envelope, straight from the file. */
-function fixtureStepDone(): Record<string, unknown> {
-  const status = object(readFixtureJson("status_running.json"));
-  return object(object(status["last_step"])["event"]);
+/** Deliberate message edge case: omitted blocks on an assistant message. */
+function sampleStepDone(): Record<string, unknown> {
+  return { type: "StepDone", v: 1, messages: [{ role: "assistant" }] };
 }
 
 function asEnvelope(raw: Record<string, unknown>): EventEnvelope {
   return raw as unknown as EventEnvelope;
 }
 
-// --- isZeroUUID, against the two spellings the real corpus contains ---------
+// --- isZeroUUID, against explicit zero and absent coordinates ---------
 
 describe("isZeroUUID", () => {
-  it("accepts the EXPLICIT all-zeros form the vendored fixtures actually carry", () => {
-    const event = fixtureTurnDone();
+  it("accepts the EXPLICIT all-zeros form an explicit payload can carry", () => {
+    const event = sampleTurnDone();
     // The key is PRESENT with a spelled-out zero value. If this ever flips to
     // absent, the assertion below is the one that says so.
     expect(Object.hasOwn(event, "loop_id")).toBe(true);
@@ -95,18 +62,18 @@ describe("isZeroUUID", () => {
     expect(isZeroUUID(loopId)).toBe(true);
   });
 
-  it("accepts an ABSENT coordinate — the fixture's TurnDone has no step_id key", () => {
-    const event = fixtureTurnDone();
+  it("accepts an ABSENT coordinate — the sample's TurnDone has no step_id key", () => {
+    const event = sampleTurnDone();
     // TurnDone is turn-scoped, so Header.Coordinates.StepID is the zero uuid and
-    // `json:"step_id,omitzero"` drops the key. This is omitzero, observed.
+    // `json:"step_id,omitzero"` drops the key. This exercises the omitted-key decoder path.
     expect(Object.hasOwn(event, "step_id")).toBe(false);
     const stepId = wireId(event, "step_id");
     expect(stepId).toBeUndefined();
     expect(isZeroUUID(stepId)).toBe(true);
   });
 
-  it("accepts an ABSENT cause id — the fixture carries no `cause` key at all", () => {
-    const event = fixtureTurnDone();
+  it("accepts an ABSENT cause id — the sample carries no `cause` key at all", () => {
+    const event = sampleTurnDone();
     // Header.Cause is `json:"cause,omitzero"` over a comparable struct, so a
     // wholly-zero cause emits nothing. This is the exact read §3b performs.
     expect(Object.hasOwn(event, "cause")).toBe(false);
@@ -119,8 +86,8 @@ describe("isZeroUUID", () => {
     expect(isZeroUUID("")).toBe(true);
   });
 
-  it("rejects a real id, including one a single nibble away from the fixture's zero", () => {
-    const zero = wireId(fixtureTurnDone(), "loop_id");
+  it("rejects a real id, including one a single nibble away from the sample's zero", () => {
+    const zero = wireId(sampleTurnDone(), "loop_id");
     expect(zero).toBe(ZERO_UUID);
     const nearlyZero = `1${(zero ?? "").slice(1)}`;
     expect(nearlyZero).toHaveLength(36);
@@ -181,8 +148,8 @@ describe("message input and stamped principal", () => {
 // --- the shared header projection -------------------------------------------
 
 describe("decodeEnduring: the shared header projection", () => {
-  it("projects the promoted header coordinates off a REAL fixture envelope", () => {
-    const decoded = decodeEnduring(asEnvelope(fixtureTurnDone()));
+  it("projects the promoted header coordinates off a explicit envelope", () => {
+    const decoded = decodeEnduring(asEnvelope(sampleTurnDone()));
     expect(decoded.type).toBe("TurnDone");
     expect(decoded.loopId).toBe(ZERO_UUID);
     expect(decoded.turnId).toBe(ZERO_UUID);
@@ -248,16 +215,14 @@ describe("decodeEnduring: the shared header projection", () => {
 // --- the §3b gate: decodeEnduring composed with isZeroUUID -------------------
 
 describe("decodeEnduring + isZeroUUID (the §3b user-row gate)", () => {
-  it("classifies the fixture's ABSENT cause as zero once projection has made it \"\"", () => {
-    const decoded = decodeEnduring(asEnvelope(fixtureTurnDone()));
+  it("classifies the sample's ABSENT cause as zero once projection has made it \"\"", () => {
+    const decoded = decodeEnduring(asEnvelope(sampleTurnDone()));
     expect(decoded.causeLoopId).toBe("");
     expect(isZeroUUID(decoded.causeLoopId)).toBe(true);
   });
 
-  it("classifies a SPELLED-OUT zero cause as zero too — the fixture normalizer's shape", () => {
-    // The fixture corpus proves this spelling is producible; re-use its own
-    // bytes rather than a literal to build the cause the normalizer would leave.
-    const zero = wireId(fixtureTurnDone(), "loop_id");
+  it("classifies a SPELLED-OUT zero cause as zero too — the explicit zero coordinate", () => {
+    const zero = wireId(sampleTurnDone(), "loop_id");
     const decoded = decodeEnduring(
       envelope({ type: "TurnFoldedInto", loopId: LOOP_A, cause: { loop_id: zero, command_id: "c1" } }),
     );
@@ -306,7 +271,6 @@ describe("decodeEnduring: the untyped long tail", () => {
  * ## Provenance of the wire strings from here down
  *
  * `contract/fixtures/` carries exactly TWO enduring envelopes — `journal_page
- * .json`'s TurnDone and `status_running.json`'s StepDone — so TurnStarted,
  * TurnFoldedInto, TurnRejected, TurnFailed, TurnInterrupted and InputCancelled
  * have NO fixture coverage at all. Hand-authoring them would only encode this
  * author's beliefs about the wire and pass happily if those beliefs were wrong
@@ -317,7 +281,7 @@ describe("decodeEnduring: the untyped long tail", () => {
  * pin, and the version `contract/VERSION` records — driven by a throwaway main
  * package that constructed the real event values. They are parsed with
  * JSON.parse so the tests consume bytes, not JS object literals. The two real
- * fixtures are still read from disk and asserted alongside them.
+ * payloads are still read from disk and asserted alongside them.
  *
  * Regenerate by marshalling the same values against that harness version. The
  * ids are helpers.ts's SESSION_ID / LOOP_A / LOOP_B plus the four below, so the
@@ -459,12 +423,8 @@ describe("decodeEnduring: StepDone", () => {
     });
   });
 
-  it("decodes the REAL vendored fixture's StepDone: one blockless AIMessage", () => {
-    // status_running.json's `last_step` is the only StepDone in the vendored
-    // corpus, and its group is a lone {"role":"assistant"} with NO blocks key.
-    // Before this task it fell through to `other`, which is exactly why a
-    // replayed session rendered blank.
-    const stepDone = fixtureStepDone();
+  it("decodes the explicit payload's StepDone: one blockless AIMessage", () => {
+    const stepDone = sampleStepDone();
     expect(stepDone["type"]).toBe("StepDone");
     expect(decodeEnduring(asEnvelope(stepDone)).payload).toStrictEqual({
       kind: "StepDone",
@@ -678,11 +638,8 @@ describe("decodeEnduring: TurnDone", () => {
     });
   });
 
-  it("decodes the REAL vendored fixture's TurnDone: turn_index only, no message", () => {
-    // journal_page.json carries the corpus's only TurnDone. It has turn_index 1
-    // and neither a message nor a usage key. Before this task it fell through to
-    // `other`.
-    const decoded = decodeEnduring(asEnvelope(fixtureTurnDone()));
+  it("decodes the explicit payload's TurnDone: turn_index only, no message", () => {
+    const decoded = decodeEnduring(asEnvelope(sampleTurnDone()));
     expect(decoded.payload).toStrictEqual({
       kind: "TurnDone",
       turnIndex: 1,
@@ -1197,5 +1154,29 @@ describe("decodeEnduring: LoopStarted", () => {
     expect(raw["initial_request_id"]).toBe(CMD_1);
     const decoded = decodeEnduring(asEnvelope(raw));
     expect(decoded.envelope).toBe(raw);
+  });
+});
+
+describe("Core v0.12.0 opaque public event bodies", () => {
+  it("retains the actual public journal bodies without inventing typed messages", () => {
+    const page = object(readFixtureJson("public_journal_page.json"));
+    const events = page["events"];
+    expect(Array.isArray(events)).toBe(true);
+    for (const event of events as unknown[]) {
+      const body = object(object(event)["body"]);
+      const decoded = decodeEnduring(asEnvelope(body));
+      expect(decoded.type).toBe("session.message");
+      expect(decoded.payload.kind).toBe("other");
+      expect(decoded.envelope).toBe(body);
+      expect(decoded.causeLoopId).toBe("");
+    }
+  });
+  it("retains the actual enduring publication body and its unknown type", () => {
+    const body = object(object(readFixtureJson("enduring_publication.json"))["body"]);
+    const decoded = decodeEnduring(asEnvelope(body));
+    expect(decoded.type).toBe("turn.completed");
+    expect(decoded.payload.kind).toBe("other");
+    expect(decoded.envelope).toBe(body);
+    expect(isZeroUUID(wireId(body, "loop_id"))).toBe(true);
   });
 });

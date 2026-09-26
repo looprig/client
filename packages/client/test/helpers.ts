@@ -15,7 +15,7 @@
  * is the exception in the other direction — it has a hand-written codec over a
  * tagged struct and is fully snake_case.
  */
-import type { EventEnvelope, EventHeader, EphemeralFrame, StatusEvent } from "../src/types.js";
+import type { EventEnvelope, StatusEvent } from "../src/types.js";
 import type { FoldInput } from "../src/fold.js";
 
 export const SESSION_ID = "11111111-1111-4111-8111-111111111111";
@@ -67,73 +67,9 @@ export function history(env: EventEnvelope, journalSeq?: number): FoldInput {
   return { segment: "history", event };
 }
 
-/** One live enduring frame carrying the same envelope shape. */
+/** A Factory publication's durable body, normalized through the shared history fold. */
 export function liveEnduring(env: EventEnvelope, journalSeq?: number): FoldInput {
-  const seq = journalSeq ?? nextSeq++;
-  if (journalSeq !== undefined) nextSeq = Math.max(nextSeq, journalSeq + 1);
-  return {
-    segment: "live",
-    frame: { type: "enduring", journalSeq: seq, data: { event: env } as never },
-  };
-}
-
-/**
- * One ephemeral frame header. `turn_id` is a real wire field on every frame the
- * live segment folds: harness's stampLoopHeader fills a TokenDelta,
- * ToolCallStarted and ToolCallCompleted header with fillTurnScoped
- * (SessionID + LoopID + TurnID), and the tool pair additionally carries the
- * StepID stampStepID stamps. `event_header.schema.json` declares all of them.
- */
-export function header(loopId?: string, turnId?: string): EventHeader {
-  const h: Record<string, unknown> = { session_id: SESSION_ID };
-  if (loopId !== undefined) h["loop_id"] = loopId;
-  if (turnId !== undefined) h["turn_id"] = turnId;
-  return h as unknown as EventHeader;
-}
-
-/** One live ephemeral frame. `kind` is the schema's enum value. */
-export function liveEphemeral(
-  kind: string,
-  delta: Record<string, unknown> | undefined,
-  loopId?: string,
-  turnId?: string,
-): FoldInput {
-  const frameData: Record<string, unknown> = { kind };
-  if (delta !== undefined) frameData["delta"] = delta;
-  if (loopId !== undefined || turnId !== undefined) frameData["header"] = header(loopId, turnId);
-  return {
-    segment: "live",
-    frame: { type: "ephemeral", data: frameData as unknown as EphemeralFrame },
-  };
-}
-
-export function textDelta(text: string, loopId?: string, turnId?: string): FoldInput {
-  return liveEphemeral("token_delta", { chunk_type: "text", text }, loopId, turnId);
-}
-
-export function thinkingDelta(thinking: string, loopId?: string, turnId?: string): FoldInput {
-  return liveEphemeral("token_delta", { chunk_type: "thinking", thinking }, loopId, turnId);
-}
-
-/**
- * harness's `refusalChunkDTO` — its own `chunk_type`, deliberately NOT riding
- * on "text", because a client that rendered a refusal as text would show the
- * model answering a request it declined.
- */
-export function refusalDelta(text: string, loopId?: string, turnId?: string): FoldInput {
-  return liveEphemeral("token_delta", { chunk_type: "refusal", text }, loopId, turnId);
-}
-
-/**
- * harness's `imageChunkDTO`. `index` is the only field with no omitempty, so
- * the caller passes exactly the keys the wire would carry.
- */
-export function imageDelta(
-  delta: Record<string, unknown>,
-  loopId?: string,
-  turnId?: string,
-): FoldInput {
-  return liveEphemeral("token_delta", { chunk_type: "image", ...delta }, loopId, turnId);
+  return history(env, journalSeq);
 }
 
 /** A Go-cased text content block, as core/content.TextBlock encodes. */
