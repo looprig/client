@@ -8,6 +8,7 @@ and realtime connection ownership. `useFactorySessionList` and
 live reasoning. `UseFactorySessionViewResult.liveReasoning` is required in
 v0.2.0; consumers constructing this result type must supply an empty array
 when no preview exists. Host reasoning publication itself is optional.
+Text and reasoning each have their own 64 KiB byte budget and 16-key cap.
 `useFactoryComposer`, `useFactoryGate`, and `useFactoryInterrupt` retain command
 identity across retries and remounts.
 

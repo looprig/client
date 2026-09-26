@@ -31,6 +31,9 @@ with `decodeFactoryLiveDelta`, returning `kind: "text"` or `"reasoning"`.
 `decodeFactoryLiveText` keeps its text-only result. Public session and UUID
 loop/turn identity must match; correlated invalid chunks suppress only their
 own preview kind and key until `StepDone`. Neither kind is durable evidence.
+In the React session view, text and reasoning each have their own 64 KiB byte
+budget and 16-key cap.
+An unclassifiable non-object chunk counts as text, matching 0.1.0.
 
 ## Refreshing
 

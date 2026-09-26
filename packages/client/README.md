@@ -17,5 +17,11 @@ SSE parser, legacy constructor or serve wire DTOs.
 
 In v0.2.0, `decodeFactoryLiveDelta` returns a `kind` of `text` or `reasoning`
 for correlated `TokenDelta` chunks. `decodeFactoryLiveText` retains its
-text-only result. `placeLivePreviews` positions both preview kinds after the
-last visible row for their loop and turn, or at the visible tail.
+text-only result. An unclassifiable non-object chunk counts as text, matching
+0.1.0. In `useFactorySessionView`, each preview kind has its own 64 KiB byte
+budget and 16-key cap.
+
+A preview's identity is (`kind`, `loopId`, `turnId`); use `livePreviewKey` to
+derive it. `placeLivePreviews` positions both kinds after the last visible row
+for their loop and turn, or at the visible tail. Unplaced turns keep first-seen
+order, with reasoning before text within each turn.

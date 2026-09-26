@@ -37,8 +37,13 @@ consumer constructing `UseFactorySessionViewResult` must supply
 
 `decodeFactoryLiveDelta` distinguishes text and reasoning (`kind: "text"` or
 `"reasoning"`); `decodeFactoryLiveText` keeps its text-only result. Both preview
-kinds share a 64 KiB byte budget and 16-entry limit. Invalid correlated chunks
-freeze only their own kind and key until `StepDone`; durable completion replaces
-the preview. Previews clear on terminal events, reset, repair, stop, identity
-change, and access revocation. `placeLivePreviews` positions both kinds after
-their last visible row for the same loop and turn, or at the visible tail.
+kinds each have their own 64 KiB byte budget and 16-entry limit. Invalid
+correlated chunks freeze only their own kind and key until `StepDone`; durable
+completion replaces the preview. Previews clear on terminal events, reset,
+repair, stop, identity change, and access revocation. A preview's identity is
+(`kind`, `loopId`, `turnId`); `livePreviewKey` exposes that identity.
+`placeLivePreviews` positions
+both kinds after their last visible row for the same loop and turn, or at the
+visible tail, grouping unplaced turns in first-seen order with reasoning before
+text within each turn. An unclassifiable non-object chunk counts as text,
+matching 0.1.0.
