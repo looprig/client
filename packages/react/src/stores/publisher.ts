@@ -58,8 +58,7 @@ export class RefreshGuard {
   }
 }
 
-/** Every rejection a `LooprigTransport` produces is already a real Error; this
- *  only narrows `strict`'s `unknown` catch type without an `as`. */
+/** Normalizes unknown rejection values into an Error for store snapshots. */
 export function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause), { cause });
 }

@@ -2,7 +2,7 @@ import { useCallback, useSyncExternalStore } from "react";
 
 /**
  * The framework-neutral store shape this package adapts. `@looprig/client`'s
- * `SessionViewStore` satisfies it structurally, and so does every store in
+ * `FactorySessionViewStore` satisfies it structurally, and so does every store in
  * `src/stores/`.
  */
 export interface ReadableStore<S> {

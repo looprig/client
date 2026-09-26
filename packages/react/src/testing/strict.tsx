@@ -19,14 +19,8 @@
  * `wrapper` INSIDE the root element (`strictModeIfNeeded(wrapUiIfNeeded(ui,
  * Wrapper))`), so a wrapper can never put StrictMode at the root.
  *
- * That makes half of the plan's Task 4.8 hollow, and precisely the half the
- * task exists for. A `wrapper` still double-INVOKES `useMemo`, so it does catch
- * a store factory with side effects. It never remounts, so it catches nothing
- * about restartability — measured: with `wrapper: strict`, making protocol's
- * `SessionViewStore.start()` a permanent no-op after the first `stop()` leaves
- * all four of `use-session-view.strict.test.tsx`'s tests GREEN, which is the
- * exact failure Task 4.8's own step 2 says to expect. With this helper, three
- * of the four fail.
+ * A wrapper catches render-phase side effects but cannot verify that a link
+ * or session binding restarts correctly after its effect cleanup.
  *
  * This helper puts `StrictMode` at the root element instead, which is the one
  * arrangement that produces the remount, and `strict.test.tsx` pins that.
