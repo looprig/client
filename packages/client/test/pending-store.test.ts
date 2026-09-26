@@ -134,6 +134,23 @@ describe('PendingSlot', () => {
     expect(storage.getItem(pendingInputKey(SESSION, NAMESPACE))).toBeNull();
   });
 
+  it('keeps a lost command pending when a malformed 404 claims command_not_found', async () => {
+    const storage = new MemoryStorage();
+    const first = scriptedLink([lost]);
+    const pending = commandsOver(first.link).input(SESSION, { blocks: [{ type: 'text', Text: 'Did this land?' }] });
+    await new PendingSlot(storage, pendingInputKey(SESSION, NAMESPACE), first.link, resolver(notFound).value).send(pending);
+
+    const second = scriptedLink([accepted]);
+    const malformed = createCommandResolver(async () => new Response(
+      JSON.stringify({ error: { code: 'command_not_found' } }), { status: 404 },
+    ));
+    const outcome = await new PendingSlot(storage, pendingInputKey(SESSION, NAMESPACE), second.link, malformed).recover();
+
+    expect(outcome).toMatchObject({ kind: 'unknown', reason: 'unreadable', commandId: pending.commandId });
+    expect(second.sent).toEqual([]);
+    expect(storage.getItem(pendingInputKey(SESSION, NAMESPACE))).not.toBeNull();
+  });
+
   it('does not resend when the lost command was admitted', async () => {
     const storage = new MemoryStorage();
     const first = scriptedLink([lost]);

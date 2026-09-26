@@ -79,7 +79,7 @@
     "test/join.test.ts": 68,
     "test/live.test.ts": 7,
     "test/messages.test.ts": 14,
-    "test/pending-store.test.ts": 40,
+    "test/pending-store.test.ts": 41,
     "test/rows-handback.test.ts": 11,
     "test/rows-live.test.ts": 23,
     "test/rows-loops.test.ts": 21,

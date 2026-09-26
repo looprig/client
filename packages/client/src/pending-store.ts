@@ -66,11 +66,6 @@ export class PendingSessionNotFoundError extends CoreProtocolError {
   }
 }
 
-function errorCode(data: unknown): unknown {
-  const error = data && typeof data === 'object' ? (data as { error?: unknown }).error : undefined;
-  return error && typeof error === 'object' ? (error as { code?: unknown }).code : undefined;
-}
-
 /** Whether a read-back failure means `pending` was never admitted, so resending its bytes is safe. */
 function neverAdmitted(pending: PendingCommand, cause: unknown): boolean {
   if (cause instanceof CommandNotFoundError) return true;
@@ -85,18 +80,18 @@ export function createCommandResolver(fetchImpl: FetchLike, baseUrl = ''): Comma
       const url = `${baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/commands/${encodeURIComponent(commandId)}`;
       const response = await fetchImpl(url, { method: 'GET', signal: options.signal });
       const data: unknown = await response.json().catch(() => undefined);
-      // Only Factory's own answer means "never admitted"; a 404 from anything
-      // else (a proxy, a missing route) says nothing about the command.
-      if (response.status === 404 && errorCode(data) === 'command_not_found') throw new CommandNotFoundError(sessionId, commandId);
       if (!response.ok) {
+        let envelope: ReturnType<typeof validateCoreErrorEnvelope>;
         try {
-          const envelope = validateCoreErrorEnvelope(data);
-          if (response.status === 404 && envelope.error.code === 'session_not_found') throw new PendingSessionNotFoundError(sessionId, commandId, envelope);
-          throw errorFromCoreEnvelope(envelope);
+          envelope = validateCoreErrorEnvelope(data);
         } catch (cause) {
-          if (cause instanceof CoreProtocolError) throw cause;
           throw new Error(`Command status request failed (${response.status}).`, { cause });
         }
+        // Only a valid Factory error envelope can prove non-admission. A proxy
+        // or malformed 404 leaves the command pending without a resend.
+        if (response.status === 404 && envelope.error.code === 'command_not_found') throw new CommandNotFoundError(sessionId, commandId);
+        if (response.status === 404 && envelope.error.code === 'session_not_found') throw new PendingSessionNotFoundError(sessionId, commandId, envelope);
+        throw errorFromCoreEnvelope(envelope);
       }
       const status = validateCommandStatus(data);
       if (status.command_id !== commandId) throw new CommandIdentityMismatchError(commandId as never, status.command_id);
