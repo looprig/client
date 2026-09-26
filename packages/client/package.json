@@ -1,0 +1,50 @@
+{
+  "name": "@looprig/client",
+  "version": "0.1.0",
+  "type": "module",
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/looprig/client.git",
+    "directory": "packages/client"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build && npm run typecheck && npm run test:package",
+    "test": "node scripts/known-drift-gate.mjs",
+    "test:raw": "vitest run",
+    "test:package": "vitest run test/surface.test.ts",
+    "typecheck": "tsc -p tsconfig.typecheck.json"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "centrifuge": "5.7.2",
+    "json-schema-to-ts": "3.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  // The consumer's OWN compiler configuration. It deliberately shares nothing
+  // with packages/client/tsconfig.json: a vanilla consumer inherits no
+  // project references, no path aliases and no `paths` mapping back into the
+  // workspace, so `@looprig/client` can only resolve through
+  // node_modules/@looprig/client -- i.e. through the installed tarball.
+  //
+  // `module`/`moduleResolution` are NodeNext because that is the resolution
+  // algorithm the package's `exports` map is written for; a consumer on
+  // "bundler" resolution would not exercise it.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "rootDir": ".",
+    "outDir": "out",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmitOnError": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["*.ts"]
+}

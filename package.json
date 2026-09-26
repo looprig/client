@@ -1,0 +1,15 @@
+{
+  "name": "looprig-client-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @looprig/client && npm run build --workspace @looprig/react",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm test --workspaces",
+    "contract:check": "cd contract && GOWORK=off GOTOOLCHAIN=go1.26.8 go test -count=1 ./...",
+    "test:package": "npm run test:package --workspace @looprig/client && node scripts/test-packed-consumers.mjs"
+  },
+  "license": "Apache-2.0"
+}
