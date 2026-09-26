@@ -303,6 +303,174 @@ function liveText(text: string, loopId = LIVE_LOOP, turnId = LIVE_TURN) {
   };
 }
 
+function liveReasoning(thinking: unknown, loopId = LIVE_LOOP, turnId = LIVE_TURN) {
+  return {
+    ...liveText("", loopId, turnId),
+    body: { ...liveText("", loopId, turnId).body, chunk: { chunk_type: "thinking", thinking } },
+  };
+}
+
+test("reasoning uses the same subscription without changing durable coverage", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveReasoning("one "));
+  h.link.open[0]!.deliver(liveText("answer"));
+  h.link.open[0]!.deliver(liveReasoning("two"));
+  await expect.poll(() => h.view.current?.liveReasoning).toStrictEqual([
+    { loopId: LIVE_LOOP, turnId: LIVE_TURN, text: "one two" },
+  ]);
+  expect(h.view.current?.liveText[0]?.text).toBe("answer");
+  expect(h.view.current?.events).toEqual([]);
+  expect(h.view.current?.coveredThrough).toBe(0);
+  expect(h.link.subscriptions).toHaveLength(1);
+});
+
+test("invalid reasoning suppresses only reasoning until StepDone", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveReasoning("before"));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("before");
+  h.link.open[0]!.deliver(liveReasoning("x".repeat(16_385)));
+  h.link.open[0]!.deliver(liveReasoning("late"));
+  h.link.open[0]!.deliver(liveText("answer"));
+  await expect.poll(() => h.view.current?.liveText[0]?.text).toBe("answer");
+  expect(h.view.current?.liveReasoning[0]?.text).toBe("before");
+  h.link.open[0]!.deliver(completed(1, "StepDone"));
+  await expect.poll(() => h.view.current?.liveReasoning).toEqual([]);
+  h.link.open[0]!.deliver(liveReasoning("next"));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("next");
+});
+
+test("invalid text does not suppress reasoning on the same turn", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveText("x".repeat(16_385)));
+  h.link.open[0]!.deliver(liveReasoning("still visible"));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("still visible");
+  expect(h.view.current?.liveText).toEqual([]);
+});
+
+test("wrong-session and malformed reasoning never render", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver({ ...liveReasoning("private"), body: { ...liveReasoning("private").body, session_id: "private" } });
+  h.link.open[0]!.deliver(liveReasoning(42));
+  h.link.open[0]!.deliver(liveReasoning("late"));
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  expect(h.view.current?.liveReasoning).toEqual([]);
+});
+
+test("text and reasoning share a 64 KiB preview budget and freeze the full key", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  for (let i = 0; i < 3; i++) h.link.open[0]!.deliver(liveReasoning("r".repeat(16_000)));
+  h.link.open[0]!.deliver(liveText("t".repeat(16_000)));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text.length).toBe(48_000);
+  await expect.poll(() => h.view.current?.liveText[0]?.text.length).toBe(16_000);
+  h.link.open[0]!.deliver(liveReasoning("r".repeat(2_000)));
+  h.link.open[0]!.deliver(liveReasoning("late"));
+  h.link.open[0]!.deliver(liveText("ok"));
+  await expect.poll(() => h.view.current?.liveText[0]?.text).toBe("t".repeat(16_000) + "ok");
+  expect(h.view.current?.liveReasoning[0]?.text).toBe("r".repeat(48_000));
+});
+
+test.each(["StepDone", "TurnDone", "TurnFailed", "TurnInterrupted", "SessionStopped"])(
+  "%s clears reasoning with text", async (type) => {
+    const h = await mountFactoryView();
+    await liveReady(h);
+    h.link.open[0]!.deliver(liveReasoning("thought"));
+    await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("thought");
+    h.link.open[0]!.deliver(completed(1, type));
+    await expect.poll(() => h.view.current?.liveReasoning).toEqual([]);
+    h.link.open[0]!.deliver(liveReasoning("late"));
+    if (type !== "StepDone") {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      expect(h.view.current?.liveReasoning).toEqual([]);
+    } else {
+      await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("late");
+    }
+  },
+);
+
+test("repair and reset clear reasoning and reject stale callbacks", async () => {
+  const h = await mountFactoryView({ setup: (_link, reads) => setPage(reads, 2, [2]) });
+  await liveReady(h, 2);
+  const old = h.link.open[0]!;
+  old.deliver(liveReasoning("before"));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("before");
+  h.link.drop();
+  await expect.poll(() => h.view.current?.liveReasoning).toEqual([]);
+  old.deliver(liveReasoning("stale"));
+  expect(h.view.current?.liveReasoning).toEqual([]);
+  await liveReady(h, 2);
+  h.link.open[0]!.deliver(liveReasoning("reset"));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("reset");
+  h.link.open[0]!.reset({ type: "session.reset", tenant_id: TENANT, session_id: FSID, journal_tip: 0, last_contiguous: 0 });
+  await expect.poll(() => h.view.current?.liveReasoning).toEqual([]);
+});
+
+test("reasoning keeps other loops when one loop commits", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  const other = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  h.link.open[0]!.deliver(liveReasoning("first"));
+  h.link.open[0]!.deliver(liveReasoning("other", other));
+  await expect.poll(() => h.view.current?.liveReasoning).toHaveLength(2);
+  h.link.open[0]!.deliver(completed(1, "StepDone"));
+  await expect.poll(() => h.view.current?.liveReasoning).toEqual([
+    { loopId: other, turnId: LIVE_TURN, text: "other" },
+  ]);
+});
+
+test("scope and session identity changes clear reasoning", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveReasoning("old"));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("old");
+  await h.rerender({ scopeKey: "other-login" });
+  expect(h.view.current?.liveReasoning).toEqual([]);
+  const session = await mountFactoryView();
+  await liveReady(session);
+  session.link.open[0]!.deliver(liveReasoning("old"));
+  await expect.poll(() => session.view.current?.liveReasoning[0]?.text).toBe("old");
+  await session.rerender({ sessionId: "another-session" });
+  expect(session.view.current?.liveReasoning).toEqual([]);
+});
+
+test("access revocation clears reasoning", async () => {
+  const h = await mountFactoryView({ setup: (_link, reads) => setPage(reads, 2, [2]) });
+  await liveReady(h, 2);
+  h.link.open[0]!.deliver(liveReasoning("private"));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("private");
+  h.reads.fail("readJournal", new CoreProtocolError({ error: {
+    code: "not_authorized", message: "revoked", retryable: false,
+  } }));
+  await h.view.current!.browseEarlier();
+  await expect.poll(() => h.view.current?.state).toBe("failed");
+  expect(h.view.current?.liveReasoning).toEqual([]);
+});
+
+test("stop cancels a pending reasoning frame", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveReasoning("pending"));
+  await h.rerender({ sessionId: "another-session" });
+  await new Promise((resolve) => requestAnimationFrame(resolve));
+  expect(h.view.current?.liveReasoning).toEqual([]);
+});
+
+test("reasoning deltas in one frame publish once", async () => {
+  const published: string[] = [];
+  const h = await mountFactoryView({ onView: (view) => {
+    if (view.liveReasoning[0] !== undefined) published.push(view.liveReasoning[0].text);
+  } });
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveReasoning("a"));
+  h.link.open[0]!.deliver(liveReasoning("b"));
+  await expect.poll(() => h.view.current?.liveReasoning[0]?.text).toBe("ab");
+  expect(published).toEqual(["ab"]);
+});
+
 function completed(sequence: number, type: string, loopId = LIVE_LOOP, turnId = LIVE_TURN): EnduringPublication {
   return {
     ...enduringFor(sequence),

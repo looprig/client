@@ -8,7 +8,7 @@ import {
   DEFAULT_MAX_TAIL_PAGES,
   DEFAULT_MAX_REPAIR_ATTEMPTS,
   DEFAULT_REPAIR_DELAY_MS,
-  decodeFactoryLiveText,
+  decodeFactoryLiveDelta,
   isRejectedJournalCursor,
   joinFactorySessionView,
   withJournalTip,
@@ -180,6 +180,8 @@ export interface UseFactorySessionViewResult {
   readonly events: readonly PublicJournalEvent[];
   /** Uncommitted assistant text from this join generation. */
   readonly liveText: readonly { readonly loopId: string; readonly turnId: string; readonly text: string }[];
+  /** Uncommitted assistant reasoning from this join generation. */
+  readonly liveReasoning: readonly { readonly loopId: string; readonly turnId: string; readonly text: string }[];
   /** Greatest sequence this view has covered, from a page or a publication. */
   readonly coveredThrough: number;
   /** The last error seen, from a cold read or from the binding. */
@@ -224,9 +226,10 @@ type FactorySessionViewSnapshot = Omit<UseFactorySessionViewResult, "browseEarli
 // plus an eviction policy for this map, is a reasonable follow-up; it is
 // simply not done here. It does not need a backward page first.
 const MAX_EARLIER_PAGE_BYTES = DEFAULT_MAX_TAIL_BYTES;
-const MAX_LIVE_TEXT_BYTES = 65_536;
-const MAX_LIVE_TEXT_KEYS = 16;
-const MAX_LIVE_TEXT_TOMBSTONES = 256;
+// Text and reasoning share one cap so adding a second preview cannot double memory use.
+const MAX_LIVE_PREVIEW_BYTES = 65_536;
+const MAX_LIVE_PREVIEW_KEYS = 16;
+const MAX_LIVE_PREVIEW_TOMBSTONES = 256;
 const earlierPageEncoder = new TextEncoder();
 
 const COLD: Omit<FactorySessionViewSnapshot, "coveredThrough"> = {
@@ -236,6 +239,7 @@ const COLD: Omit<FactorySessionViewSnapshot, "coveredThrough"> = {
   gates: null,
   events: [],
   liveText: [],
+  liveReasoning: [],
   error: null,
   earlierState: "idle",
 };
@@ -249,7 +253,8 @@ const COLD: Omit<FactorySessionViewSnapshot, "coveredThrough"> = {
 class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
   readonly #currentEvents = new Map<number, PublicJournalEvent>();
   readonly #liveText = new Map<string, { loopId: string; turnId: string; text: string; bytes: number }>();
-  #liveTextBytes = 0;
+  readonly #liveReasoning = new Map<string, { loopId: string; turnId: string; text: string; bytes: number }>();
+  #livePreviewBytes = 0;
   readonly #endedTurns = new Set<string>();
   readonly #suppressedLiveKeys = new Set<string>();
   #sessionStopped = false;
@@ -377,7 +382,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     this.#gateController?.abort();
     if (this.#gateTimer !== undefined) clearTimeout(this.#gateTimer);
     this.#gateTimer = undefined;
-    this.#resetLiveText();
+    this.#resetLivePreviews();
   }
 
   browseEarlier(): Promise<void> {
@@ -470,10 +475,10 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     this.#currentEvents.clear();
     this.#resetEarlier();
     this.#gates = null;
-    this.#resetLiveText(false);
+    this.#resetLivePreviews(false);
     this.publish({
       state: "failed", liveState: "failed", status: null, gates: null,
-      events: [], liveText: [], coveredThrough: 0, error: cause, earlierState: "idle",
+      events: [], liveText: [], liveReasoning: [], coveredThrough: 0, error: cause, earlierState: "idle",
     });
     this.stop();
     return true;
@@ -580,8 +585,8 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
       for await (const event of joinFactorySessionView(
         liveReads,
         { subscribe: (options) => {
-          this.#resetLiveText(false);
-          this.publish({ liveState: subscriptions++ === 0 ? "joining" : "repairing", liveText: [] });
+          this.#resetLivePreviews(false);
+          this.publish({ liveState: subscriptions++ === 0 ? "joining" : "repairing", liveText: [], liveReasoning: [] });
           return this.link.bindSubscription(options);
         } },
         this.tenantId,
@@ -599,19 +604,21 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
       )) {
         if (!this.#current(generation, signal)) return;
         if (event.generation !== this.#joinGeneration) {
-          const hadPreview = this.snapshot().liveText.length > 0;
-          this.#resetLiveText(false);
+          const hadPreview = this.snapshot().liveText.length > 0 || this.snapshot().liveReasoning.length > 0;
+          this.#resetLivePreviews(false);
           this.#joinGeneration = event.generation;
           if (hadPreview && event.kind === "ephemeral") this.#scheduleLiveFrame(generation, signal);
         }
         if (event.kind === "ephemeral") {
-          const delta = decodeFactoryLiveText(event.publication.body, this.sessionId);
+          const delta = decodeFactoryLiveDelta(event.publication.body, this.sessionId);
           if (delta !== null && !this.#sessionStopped) {
             const key = `${delta.loopId}:${delta.turnId}`;
-            if (this.#endedTurns.has(key) || this.#suppressedLiveKeys.has(key)) continue;
-            const prior = this.#liveText.get(key);
+            const suppressionKey = `${delta.kind}:${key}`;
+            if (this.#endedTurns.has(key) || this.#suppressedLiveKeys.has(suppressionKey)) continue;
+            const previews = delta.kind === "text" ? this.#liveText : this.#liveReasoning;
+            const prior = previews.get(key);
             if ("rejected" in delta) {
-              this.#remember(this.#suppressedLiveKeys, key);
+              this.#remember(this.#suppressedLiveKeys, suppressionKey);
             } else {
               const chunkBytes = earlierPageEncoder.encode(delta.text).byteLength;
               const previousLast = prior?.text.charCodeAt(prior.text.length - 1);
@@ -619,14 +626,15 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
               const joinedSurrogate = previousLast !== undefined && previousLast >= 0xd800 && previousLast <= 0xdbff
                 && nextFirst >= 0xdc00 && nextFirst <= 0xdfff;
               const addedBytes = chunkBytes - (joinedSurrogate ? 2 : 0);
-              if (this.#liveTextBytes + addedBytes > MAX_LIVE_TEXT_BYTES
-                || (prior === undefined && this.#liveText.size >= MAX_LIVE_TEXT_KEYS)) {
-                this.#remember(this.#suppressedLiveKeys, key);
+              if (this.#livePreviewBytes + addedBytes > MAX_LIVE_PREVIEW_BYTES
+                || (prior === undefined && this.#liveText.size + this.#liveReasoning.size >= MAX_LIVE_PREVIEW_KEYS)) {
+                this.#remember(this.#suppressedLiveKeys, suppressionKey);
               } else {
-                this.#liveText.set(key, {
-                  ...delta, text: (prior?.text ?? "") + delta.text, bytes: (prior?.bytes ?? 0) + addedBytes,
+                previews.set(key, {
+                  loopId: delta.loopId, turnId: delta.turnId,
+                  text: (prior?.text ?? "") + delta.text, bytes: (prior?.bytes ?? 0) + addedBytes,
                 });
-                this.#liveTextBytes += addedBytes;
+                this.#livePreviewBytes += addedBytes;
                 this.#scheduleLiveFrame(generation, signal);
               }
             }
@@ -635,7 +643,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
         }
         let earlierReset = false;
         if (event.kind === "projection") {
-          this.#resetLiveText(false);
+          this.#resetLivePreviews(false);
           // A lower committed floor is a protocol-validated reset. Remove rows
           // the server no longer holds before admitting this generation's tail.
           const lowered = projected
@@ -653,7 +661,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
           projected = true;
         } else if (event.kind === "public") {
           this.#currentEvents.set(event.event.journal_seq, event.event);
-          this.#reconcileLiveText(event.event.body);
+          this.#reconcileLivePreviews(event.event.body);
         }
         liveCoverage = event.coveredThrough;
         this.publish({
@@ -661,14 +669,15 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
           liveState: event.coveredThrough >= event.status.journal_tip ? "live" : "repairing",
           events: this.#ordered(), coveredThrough: event.coveredThrough, error: null,
           liveText: this.#visibleLiveText(),
+          liveReasoning: this.#visibleLiveReasoning(),
           ...(earlierReset ? { earlierState: "idle" as const } : {}),
         });
       }
     } catch (cause) {
       if (this.#current(generation, signal)) {
         // A durable snapshot remains useful during a transport repair failure.
-        this.#resetLiveText(false);
-        this.publish({ state: this.snapshot().status === null ? "failed" : "ready", liveState: "failed", liveText: [], error: asError(cause) });
+        this.#resetLivePreviews(false);
+        this.publish({ state: this.snapshot().status === null ? "failed" : "ready", liveState: "failed", liveText: [], liveReasoning: [], error: asError(cause) });
       }
     }
   }
@@ -677,11 +686,17 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     return [...this.#liveText.values()].map(({ loopId, turnId, text }) => ({ loopId, turnId, text }));
   }
 
+  #visibleLiveReasoning(): FactorySessionViewSnapshot["liveReasoning"] {
+    return [...this.#liveReasoning.values()].map(({ loopId, turnId, text }) => ({ loopId, turnId, text }));
+  }
+
   #scheduleLiveFrame(generation: number, signal: AbortSignal): void {
     if (this.#cancelLiveFrame !== undefined) return;
     const flush = (): void => {
       this.#cancelLiveFrame = undefined;
-      if (this.#current(generation, signal)) this.publish({ liveText: this.#visibleLiveText() });
+      if (this.#current(generation, signal)) this.publish({
+        liveText: this.#visibleLiveText(), liveReasoning: this.#visibleLiveReasoning(),
+      });
     };
     if (typeof requestAnimationFrame === "function") {
       const frame = requestAnimationFrame(flush);
@@ -692,45 +707,54 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     }
   }
 
-  #deleteLiveKey(key: string): void {
-    const item = this.#liveText.get(key);
-    if (item !== undefined) {
-      this.#liveTextBytes -= item.bytes;
-      this.#liveText.delete(key);
+  #deleteLiveTurn(key: string): void {
+    for (const previews of [this.#liveText, this.#liveReasoning]) {
+      const item = previews.get(key);
+      if (item !== undefined) {
+        this.#livePreviewBytes -= item.bytes;
+        previews.delete(key);
+      }
     }
   }
 
   #remember(set: Set<string>, key: string): void {
     set.add(key);
-    if (set.size > MAX_LIVE_TEXT_TOMBSTONES) {
-      const evict = [...set].find((candidate) => set !== this.#suppressedLiveKeys || !this.#liveText.has(candidate));
+    if (set.size > MAX_LIVE_PREVIEW_TOMBSTONES) {
+      const evict = [...set].find((candidate) => {
+        if (set !== this.#suppressedLiveKeys) return true;
+        const previews = candidate.startsWith("text:") ? this.#liveText : this.#liveReasoning;
+        return !previews.has(candidate.slice(candidate.indexOf(":") + 1));
+      });
       if (evict !== undefined) set.delete(evict);
     }
   }
 
-  #resetLiveText(publish = true): void {
-    const visible = this.snapshot().liveText.length > 0;
+  #resetLivePreviews(publish = true): void {
+    const visible = this.snapshot().liveText.length > 0 || this.snapshot().liveReasoning.length > 0;
     this.#liveText.clear();
-    this.#liveTextBytes = 0;
+    this.#liveReasoning.clear();
+    this.#livePreviewBytes = 0;
     this.#endedTurns.clear();
     this.#suppressedLiveKeys.clear();
     this.#sessionStopped = false;
     this.#joinGeneration = 0;
     this.#cancelLiveFrame?.();
     this.#cancelLiveFrame = undefined;
-    if (publish && visible) this.publish({ liveText: [] });
+    if (publish && visible) this.publish({ liveText: [], liveReasoning: [] });
   }
 
-  #reconcileLiveText(body: unknown): void {
+  #reconcileLivePreviews(body: unknown): void {
     if (typeof body !== "object" || body === null || Array.isArray(body)) return;
     const value = body as Record<string, unknown>;
     if (value["type"] === "SessionStopped") {
       this.#liveText.clear();
-      this.#liveTextBytes = 0;
+      this.#liveReasoning.clear();
+      this.#livePreviewBytes = 0;
       this.#sessionStopped = true;
     } else if (value["type"] === "StepDone" && typeof value["loop_id"] === "string") {
-      for (const [key, item] of this.#liveText) if (item.loopId === value["loop_id"]) this.#deleteLiveKey(key);
-      for (const key of this.#suppressedLiveKeys) if (key.startsWith(`${value["loop_id"]}:`)) this.#suppressedLiveKeys.delete(key);
+      for (const [key, item] of this.#liveText) if (item.loopId === value["loop_id"]) this.#deleteLiveTurn(key);
+      for (const [key, item] of this.#liveReasoning) if (item.loopId === value["loop_id"]) this.#deleteLiveTurn(key);
+      for (const key of this.#suppressedLiveKeys) if (key.includes(`:${value["loop_id"]}:`)) this.#suppressedLiveKeys.delete(key);
     } else if (value["type"] === "TurnStarted") {
       this.#sessionStopped = false;
       if (typeof value["loop_id"] === "string") {
@@ -742,7 +766,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
       || value["type"] === "TurnInterrupted")
       && typeof value["loop_id"] === "string" && typeof value["turn_id"] === "string") {
       const key = `${value["loop_id"]}:${value["turn_id"]}`;
-      this.#deleteLiveKey(key);
+      this.#deleteLiveTurn(key);
       this.#remember(this.#endedTurns, key);
     } else return;
     this.#cancelLiveFrame?.();
