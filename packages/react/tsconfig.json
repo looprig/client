@@ -1,0 +1,37 @@
+{
+  // The BUILD config: `src` only, emitting `.d.ts` into `dist` for a future npm
+  // publish. It deliberately carries no `paths` mapping for `@looprig/client`,
+  // so it resolves the sibling workspace through its package `exports` (i.e. its
+  // built `dist`) exactly as a published consumer would. `tsconfig.typecheck.json`
+  // is the one CI runs, and it maps straight to protocol's source — a `paths`
+  // entry pointing outside `rootDir` is a TS6059 error under `declaration: true`,
+  // which is why these cannot be one file.
+  //
+  // `exactOptionalPropertyTypes` is deliberately NOT set, against 04-react.md's
+  // scaffold. The flag is program-wide, and `tsconfig.typecheck.json` pulls
+  // `@looprig/client`'s SOURCE into this program (the same file's alias
+  // mandates that, because protocol's dist is gitignored and CI has none), so
+  // turning it on reports four errors in `protocol/src/{join,transport}.ts`
+  // and none here. Enabling it would mean either editing another package to
+  // satisfy a flag that package does not itself set — leaving nothing to stop
+  // it regressing — or making typecheck consume a build artifact, which is the
+  // build-then-check ordering the source alias exists to remove.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/testing"]
+}

@@ -1,0 +1,22 @@
+{
+  // What `npm run typecheck` runs, and the only one CI runs. Two differences
+  // from the build config, both deliberate:
+  //
+  //  - `packages/client/dist` is gitignored, so a `npm ci` checkout has no
+  //    built protocol at all. Mapping `@looprig/client` to its SOURCE keeps
+  //    typecheck free of a build-then-check ordering between the two workspace
+  //    packages, mirroring `vitest.config.ts`'s alias so the two agree.
+  //  - the test files and `src/testing/` are included. A test suite that is not
+  //    type-checked rots silently, and these fakes are the substrate every hook
+  //    test in this package stands on.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "..",
+    "paths": {
+      "@looprig/client": ["../client/src/index.ts"]
+    }
+  },
+  "include": ["src"],
+  "exclude": []
+}
