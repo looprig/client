@@ -1,6 +1,6 @@
 {
   "name": "@looprig/react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,7 +21,7 @@
     "react-dom": "^19.0.0"
   },
   "dependencies": {
-    "@looprig/client": "0.1.0"
+    "@looprig/client": "0.2.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",

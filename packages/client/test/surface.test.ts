@@ -285,6 +285,7 @@ describe("@looprig/client public surface", () => {
       "createFactoryCommands", "createClientLink", "FactoryRestReads", "CapturedTail",
       "fold", "emptySessionView", "createPublicEventFolder", "PendingSlot",
       "createRefreshingFetch", "LinkRecoveryController", "decodeFactoryLiveText",
+      "decodeFactoryLiveDelta", "placeLivePreviews",
       "ContractValidationError", "validateFactory", "errorFromCoreEnvelope", "textBlock",
       "MessageMetadataError", "MAX_METADATA_FIELDS", "MAX_METADATA_KEY_BYTES",
       "MAX_METADATA_VALUE_BYTES", "MAX_METADATA_BYTES",
@@ -378,7 +379,7 @@ describe("@looprig/client public surface", () => {
     >;
     expect(manifest).toMatchObject({
       name: "@looprig/client",
-      version: "0.1.0",
+      version: "0.2.0",
       type: "module",
       files: ["dist", "LICENSE", "NOTICE", "README.md"],
       main: "./dist/index.js",
