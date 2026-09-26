@@ -17,8 +17,9 @@ Nothing here is non-test Go source. The direct Core requirement exists only for
 this drift guard, so `go mod tidy` would remove it; use the documented `go get`
 workflow when moving the pin.
 
-Harness-era fixtures copied from WUI live under `../legacy-contract/`. They are
-outside this Core mirror and outside the drift guard.
+The TypeScript package mirrors the Factory-facing schema subset and checks each
+mirror and its corresponding fixtures. HostLink schemas remain in this complete
+Core corpus for the byte-for-byte guard; they are not a browser transport API.
 
 ## Refreshing
 
