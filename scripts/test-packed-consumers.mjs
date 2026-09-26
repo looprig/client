@@ -7,11 +7,13 @@ const workspace = resolve(import.meta.dirname, '..');
 const scratch = mkdtempSync(join(tmpdir(), 'looprig-packed-consumer-'));
 const tarballs = join(scratch, 'tarballs');
 const consumer = join(scratch, 'consumer');
+const vanilla = join(scratch, 'vanilla');
 mkdirSync(tarballs);
 mkdirSync(consumer);
+mkdirSync(vanilla);
 const run = (bin, args, cwd) => execFileSync(bin, args, {
   cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...process.env, ...(cwd === consumer ? { npm_config_workspaces: 'false' } : {}) },
+  env: { ...process.env, ...(cwd !== workspace ? { npm_config_workspaces: 'false' } : {}) },
 });
 const provided = {
   client: process.env.LOOPRIG_CLIENT_TARBALL,
@@ -67,7 +69,22 @@ try {
   }
   run(join(consumer, 'node_modules/.bin/tsc'), ['-p', 'tsconfig.json'], consumer);
   run(process.execPath, ['consumer.mjs'], consumer);
-  console.log(`Packed consumers passed (TypeScript 5.9.3, client ${packed[0].files} files, React ${packed[1].files} files).`);
+  writeFileSync(join(vanilla, 'package.json'), JSON.stringify({
+    private: true,
+    type: 'module',
+    dependencies: { '@looprig/client': `file:${packed[0].tarball}` },
+    devDependencies: { typescript: '5.9.3' },
+  }, null, 2));
+  writeFileSync(join(vanilla, 'tsconfig.json'), JSON.stringify({
+    compilerOptions: { target: 'ES2022', lib: ['ES2022', 'DOM'], module: 'ESNext', moduleResolution: 'bundler', strict: true, noEmit: true, skipLibCheck: true },
+    include: ['consumer.ts'],
+  }));
+  writeFileSync(join(vanilla, 'consumer.ts'), `import { createFactoryClient, uuidV4, type FactoryClient } from '@looprig/client';\nconst client: FactoryClient = createFactoryClient();\nvoid [client, uuidV4];\n`);
+  writeFileSync(join(vanilla, 'consumer.mjs'), `import { createFactoryClient } from '@looprig/client';\nif (typeof createFactoryClient().idGenerator() !== 'string') throw Error('client runtime export');\n`);
+  run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], vanilla);
+  run(join(vanilla, 'node_modules/.bin/tsc'), ['-p', 'tsconfig.json'], vanilla);
+  run(process.execPath, ['consumer.mjs'], vanilla);
+  console.log(`Packed vanilla and React consumers passed (TypeScript 5.9.3, client ${packed[0].files} files, React ${packed[1].files} files).`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }
