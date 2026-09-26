@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/session_reset.schema.json",
+  "title": "SessionReset",
+  "description": "Forward-compatible repair control after a durable live-tail gap. Core enforces last_contiguous <= journal_tip.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "tenant_id", "session_id", "last_contiguous", "journal_tip"],
+  "properties": {
+    "type": {"const": "session.reset", "type": "string", "description": "Stable session-channel record name. Every record published on session:{tid}:{sid} names its own kind here."},
+    "tenant_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "last_contiguous": {"type": "integer", "minimum": 0},
+    "journal_tip": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."}
+  }
+}

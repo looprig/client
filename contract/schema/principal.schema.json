@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/principal.schema.json",
+  "title": "Principal",
+  "description": "The verified sender of a command as a Factory established it. Never client-supplied; holds only verified facts (display names are resolved by the application from subject). Carried by every command request as the optional principal member.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tenant", "subject", "kind"],
+  "properties": {
+    "tenant": {"$ref": "#/$defs/id"},
+    "subject": {"$ref": "#/$defs/id"},
+    "kind": {"enum": ["actor", "service"]}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."}
+  }
+}

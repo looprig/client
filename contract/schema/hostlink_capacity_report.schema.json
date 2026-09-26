@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/hostlink_capacity_report.schema.json",
+  "title": "HostLinkCapacityReport",
+  "description": "Strict current capacity advertisement. A pooled Host is cross-tenant eligible only when its advertised isolation_class says cross_tenant_isolated; dedicated capacity is bounded to zero or one by Core.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "host_id", "host_generation", "agent_id", "runtime_compatibility_id", "placement", "internal_endpoint", "isolation_class", "accepting", "available_capacity", "observed_at", "expires_at"],
+  "properties": {
+    "version": {"const": 1},
+    "host_id": {"$ref": "#/$defs/id"},
+    "host_generation": {"type": "integer", "minimum": 1},
+    "agent_id": {"$ref": "#/$defs/id"},
+    "runtime_compatibility_id": {"$ref": "#/$defs/id"},
+    "placement": {"enum": ["pooled", "dedicated"]},
+    "internal_endpoint": {"type": "string", "format": "uri", "description": "Credential-free ws or wss endpoint; Core rejects query, fragment, and userinfo."},
+    "isolation_class": {"enum": ["cross_tenant_isolated", "tenant_exclusive"]},
+    "accepting": {"type": "boolean"},
+    "available_capacity": {"type": "integer", "minimum": 0},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 control identity; Core enforces the 256-byte limit."}
+  }
+}

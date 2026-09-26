@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/version_negotiation_request.schema.json",
+  "title": "VersionNegotiationRequest",
+  "description": "Strict pre-control offer of nonzero, duplicate-free sessionwire versions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["supported_versions"],
+  "properties": {
+    "supported_versions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}
+  }
+}

@@ -1,0 +1,1 @@
+{"agents":[{"agent_id":"agent-1","capabilities":["input","gates"],"future_agent_hint":{"mode":"pooled"},"runtime_compatibility_id":"runtime-2026-08"}],"future_department_hint":{"region":"test"}}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/hostlink_bind_request.schema.json",
+  "title": "HostLinkBindRequest",
+  "description": "Strict internal control request that binds one Factory-local route to a Host lease tuple. It carries no client authority or runtime payload.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "tenant_id", "session_id", "host_id", "host_generation", "lease_epoch", "runtime_compatibility_id", "idempotency_key"],
+  "properties": {
+    "version": {"const": 1},
+    "tenant_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "host_id": {"$ref": "#/$defs/id"},
+    "host_generation": {"type": "integer", "minimum": 1},
+    "lease_epoch": {"type": "integer", "minimum": 1},
+    "runtime_compatibility_id": {"$ref": "#/$defs/id"},
+    "idempotency_key": {"$ref": "#/$defs/id"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 control identity; Core enforces the 256-byte limit."}
+  }
+}

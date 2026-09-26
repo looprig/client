@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/hostlink_attach_request.schema.json",
+  "title": "HostLinkAttachRequest",
+  "description": "Strict internal control request asking one Host incarnation (host_id, host_generation) to make one session resident by creating or restoring it. It carries no lease epoch: a cold attach acquires one and an attach to an already-resident session returns the existing one; the reply is a HostLinkRegistryObservation or a HostLinkError. actor_id is the requesting service identity, not an end user. It carries no client authority or runtime payload.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "tenant_id", "session_id", "host_id", "host_generation", "agent_id", "runtime_compatibility_id", "mode", "actor_id", "idempotency_key"],
+  "properties": {
+    "version": {"const": 1},
+    "tenant_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "host_id": {"$ref": "#/$defs/id"},
+    "host_generation": {"type": "integer", "minimum": 1},
+    "agent_id": {"$ref": "#/$defs/id"},
+    "runtime_compatibility_id": {"$ref": "#/$defs/id"},
+    "mode": {"enum": ["create", "restore"]},
+    "actor_id": {"$ref": "#/$defs/id"},
+    "trace_id": {"$ref": "#/$defs/id"},
+    "idempotency_key": {"$ref": "#/$defs/id"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 control identity; Core enforces the 256-byte limit."}
+  }
+}

@@ -1,0 +1,1 @@
+{"accepting":true,"agent_id":"agent-1","expires_at":"2026-08-29T12:01:00Z","host_generation":7,"host_id":"host-1","internal_endpoint":"wss://host-1.internal/hostlink","lease_epoch":3,"observed_at":"2026-08-29T12:00:00Z","placement":"pooled","residency":"resident","runtime_compatibility_id":"runtime-2026-08","session_id":"session-1","tenant_id":"tenant-1","version":1}

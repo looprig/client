@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/version_negotiation_response.schema.json",
+  "title": "VersionNegotiationResponse",
+  "description": "Forward-compatible selected sessionwire version. hostlink_methods is the optional set of reserved HostLink method names the replying Host serves; it is absent when the Host advertises nothing and its item values are deliberately open so a method added later does not invalidate an older consumer.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version"],
+  "properties": {
+    "version": {"const": 1},
+    "hostlink_methods": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "description": "A reserved HostLink method name such as hostlink.attach; Core enforces the 256-byte identifier limit and tolerates a name it does not know."}
+    }
+  }
+}

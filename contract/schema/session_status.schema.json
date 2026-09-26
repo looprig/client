@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/session_status.schema.json",
+  "title": "SessionStatus",
+  "description": "Forward-compatible durable session state and residency projection.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["session_id", "agent_id", "state", "residency", "journal_tip"],
+  "properties": {
+    "session_id": {"$ref": "#/$defs/id"},
+    "agent_id": {"$ref": "#/$defs/id"},
+    "state": {"type": "string", "minLength": 1},
+    "residency": {"type": "string", "minLength": 1},
+    "journal_tip": {"type": "integer", "minimum": 0},
+    "waiting_gate_id": {"$ref": "#/$defs/id"},
+    "updated_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."}
+  }
+}

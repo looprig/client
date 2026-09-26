@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/gate_response_request.schema.json",
+  "title": "GateResponseRequest",
+  "description": "Retry-safe private gate response. values are opaque JSON values; the request requires exactly one nonzero optimistic open version. principal is optional and only ever Factory-stamped; metadata is never carried.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "command_id", "session_id", "gate_id", "action", "values"],
+  "properties": {
+    "version": {"const": 1},
+    "command_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "gate_id": {"$ref": "#/$defs/id"},
+    "action": {"type": "string", "minLength": 1},
+    "values": {"type": "object", "additionalProperties": true},
+    "expected_open_event_id": {"$ref": "#/$defs/id"},
+    "expected_open_journal_seq": {"type": "integer", "minimum": 1},
+    "principal": {"$ref": "#/$defs/principal"}
+  },
+  "oneOf": [
+    {"required": ["expected_open_event_id"], "not": {"required": ["expected_open_journal_seq"]}},
+    {"required": ["expected_open_journal_seq"], "not": {"required": ["expected_open_event_id"]}}
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."},
+    "principal": {
+      "type": "object",
+      "description": "The verified sender a Factory stamped after credential verification. Never client-supplied: a Factory refuses a request that carries it.",
+      "additionalProperties": false,
+      "required": ["tenant", "subject", "kind"],
+      "properties": {
+        "tenant": {"$ref": "#/$defs/id"},
+        "subject": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["actor", "service"]}
+      }
+    }
+  }
+}

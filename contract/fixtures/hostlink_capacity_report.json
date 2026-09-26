@@ -1,0 +1,1 @@
+{"accepting":true,"agent_id":"agent-1","available_capacity":4,"expires_at":"2026-08-29T12:01:00Z","host_generation":7,"host_id":"host-1","internal_endpoint":"wss://host-1.internal/hostlink","isolation_class":"cross_tenant_isolated","observed_at":"2026-08-29T12:00:00Z","placement":"pooled","runtime_compatibility_id":"runtime-2026-08","version":1}

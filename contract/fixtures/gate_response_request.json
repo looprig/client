@@ -1,0 +1,1 @@
+{"version":1,"command_id":"cmd-gate-1","session_id":"session-1","gate_id":"gate-1","action":"answer","values":{"answer":"yes","count":2},"expected_open_event_id":"event-6"}

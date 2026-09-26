@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/department_capability_summary.schema.json",
+  "title": "DepartmentCapabilitySummary",
+  "description": "Forward-compatible public Department capability discovery response.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["agents"],
+  "properties": {
+    "agents": {"type": "array", "items": {"$ref": "#/$defs/agent"}}
+  },
+  "$defs": {
+    "agent": {"type": "object", "additionalProperties": true, "required": ["agent_id", "runtime_compatibility_id"], "properties": {"agent_id": {"type": "string", "minLength": 1}, "runtime_compatibility_id": {"type": "string", "minLength": 1}, "capabilities": {"type": "array", "items": {"type": "string"}}}}
+  }
+}

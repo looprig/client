@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/session_summary.schema.json",
+  "title": "SessionSummary",
+  "description": "Forward-compatible recent-session projection without a live Host route.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["session_id", "agent_id", "state", "last_active_at"],
+  "properties": {
+    "session_id": {"$ref": "#/$defs/id"},
+    "agent_id": {"$ref": "#/$defs/id"},
+    "state": {"type": "string", "minLength": 1},
+    "title": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "last_active_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."}
+  }
+}

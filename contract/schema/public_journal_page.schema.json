@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/public_journal_page.schema.json",
+  "title": "JournalPage",
+  "description": "Bounded public journal page. covered_through can bridge private records without exposing their kind or bytes.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["events", "journal_tip", "covered_through"],
+  "properties": {
+    "events": {"type": "array", "items": {"$ref": "#/$defs/event"}},
+    "journal_tip": {"type": "integer", "minimum": 0},
+    "covered_through": {"type": "integer", "minimum": 0},
+    "next_cursor": {"type": "string"},
+    "previous_cursor": {"type": "string"}
+  },
+  "$defs": {
+    "event": {"type": "object", "additionalProperties": true, "required": ["event_id", "journal_seq", "body"], "properties": {"event_id": {"type": "string", "minLength": 1}, "journal_seq": {"type": "integer", "minimum": 1}, "body": {"not": {"type": "null"}}}}
+  }
+}

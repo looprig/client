@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/hostlink_drain_observation.schema.json",
+  "title": "HostLinkDrainObservation",
+  "description": "Strict observed drain state. A caller observes the stable generation rather than inferring completion from a transport close.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["host_id", "host_generation", "drain_generation", "state"],
+  "properties": {
+    "host_id": {"$ref": "#/$defs/id"},
+    "host_generation": {"type": "integer", "minimum": 1},
+    "drain_generation": {"type": "integer", "minimum": 1},
+    "state": {"enum": ["draining", "drained"]},
+    "tenant_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"}
+  },
+  "anyOf": [
+    {"required": ["tenant_id", "session_id"]},
+    {"not": {"anyOf": [{"required": ["tenant_id"]}, {"required": ["session_id"]}]}}
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 control identity; Core enforces the 256-byte limit."}
+  }
+}

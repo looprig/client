@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/public_gate_page.schema.json",
+  "title": "GatePage",
+  "description": "Bounded public page of open gates captured at journal_tip. Prompts are presentation-safe projections only.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["journal_tip", "open_gate_count", "gates"],
+  "properties": {
+    "journal_tip": {"type": "integer", "minimum": 0},
+    "open_gate_count": {"type": "integer", "minimum": 0},
+    "gates": {"type": "array", "items": {"$ref": "#/$defs/gate"}},
+    "next_cursor": {"type": "string"},
+    "previous_cursor": {"type": "string"}
+  },
+  "$defs": {
+    "gate": {"type": "object", "additionalProperties": true, "required": ["gate_id", "kind", "prompt", "opened_event_id", "opened_journal_seq", "deadline", "answerability"], "properties": {"gate_id": {"type": "string", "minLength": 1}, "kind": {"type": "string", "minLength": 1}, "prompt": {"$ref": "#/$defs/prompt"}, "opened_event_id": {"type": "string", "minLength": 1}, "opened_journal_seq": {"type": "integer", "minimum": 1}, "deadline": {"type": "string", "format": "date-time"}, "answerability": {"enum": ["resident", "suspended", "submitted", "unavailable", "expired"]}}},
+    "prompt": {"type": "object", "additionalProperties": true, "properties": {"title": {"type": "string"}, "body": {"type": "string"}, "origin": {"type": "string", "format": "uri"}, "schema": {"$ref": "#/$defs/prompt_schema"}, "controls": {"type": "array", "items": {"type": "object", "additionalProperties": true, "required": ["action", "label"], "properties": {"action": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}}}}}},
+    "prompt_schema": {"type": "object", "additionalProperties": true, "properties": {"fields": {"type": "array", "items": {"type": "object", "additionalProperties": true, "required": ["name", "label", "kind", "required"], "properties": {"name": {"type": "string", "minLength": 1}, "label": {"type": "string"}, "kind": {"enum": ["text", "select", "multi_select", "confirm"]}, "required": {"type": "boolean"}, "options": {"type": "array"}, "default": {}}}}}}
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/journal_tip.schema.json",
+  "title": "JournalTip",
+  "description": "Forward-compatible repeatable durable-repair hint, not a client acknowledgement or cursor.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "tenant_id", "session_id", "journal_tip"],
+  "properties": {
+    "type": {"const": "journal_tip", "type": "string", "description": "Stable session-channel record name. Every record published on session:{tid}:{sid} names its own kind here."},
+    "tenant_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "journal_tip": {"type": "integer", "minimum": 0}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."}
+  }
+}

@@ -1,0 +1,4 @@
+Looprig browser clients
+Copyright 2026 Looprig contributors
+
+This distribution includes code copied and adapted from Looprig WUI v0.5.0 and Oxy main (see docs/provenance.md). All project code is licensed under Apache-2.0. Third-party dependencies retain their respective licenses.

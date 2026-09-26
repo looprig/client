@@ -1,0 +1,1 @@
+{"version":1,"command_id":"cmd-gate-2","session_id":"session-1","gate_id":"gate-1","action":"answer","values":{"answer":"yes"},"expected_open_event_id":"event-6","principal":{"tenant":"tenant-1","subject":"subject-1","kind":"actor"}}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/command_status.schema.json",
+  "title": "CommandStatus",
+  "description": "Forward-compatible durable command lifecycle response. A rejected command has a stable public error detail.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["command_id", "status"],
+  "properties": {
+    "command_id": {"$ref": "#/$defs/id"},
+    "status": {"enum": ["accepted", "pending", "applied", "rejected"]},
+    "accepted_order": {"type": "integer", "minimum": 1},
+    "error": {"$ref": "#/$defs/error"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."},
+    "error": {"type": "object", "additionalProperties": true, "required": ["code", "retryable"], "properties": {"code": {"type": "string", "minLength": 1}, "message": {"type": "string"}, "retryable": {"type": "boolean"}}}
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/enduring_publication.schema.json",
+  "title": "EnduringPublication",
+  "description": "Forward-compatible live relay of one committed public journal event. Core enforces journal_seq == covered_through and the raw body fixed-point JSON representation.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["type", "tenant_id", "session_id", "event_id", "journal_seq", "covered_through", "body"],
+  "properties": {
+    "type": {"const": "enduring_publication", "type": "string", "description": "Stable session-channel record name. Every record published on session:{tid}:{sid} names its own kind here."},
+    "tenant_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "event_id": {"$ref": "#/$defs/id"},
+    "journal_seq": {"type": "integer", "minimum": 1},
+    "covered_through": {"type": "integer", "minimum": 1},
+    "body": {"not": {"type": "null"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."}
+  }
+}

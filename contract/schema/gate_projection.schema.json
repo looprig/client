@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/gate_projection.schema.json",
+  "title": "GateProjection",
+  "description": "Forward-compatible public gate projection. It intentionally contains presentation-safe prompt data only, never a submitted answer, private prepared payload, credential, or signed URL.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["gate_id", "kind", "prompt", "opened_event_id", "opened_journal_seq", "deadline", "answerability"],
+  "properties": {
+    "gate_id": {"type": "string", "minLength": 1},
+    "kind": {"type": "string", "minLength": 1},
+    "prompt": {"$ref": "#/$defs/prompt"},
+    "opened_event_id": {"type": "string", "minLength": 1},
+    "opened_journal_seq": {"type": "integer", "minimum": 1},
+    "deadline": {"type": "string", "format": "date-time"},
+    "answerability": {"enum": ["resident", "suspended", "submitted", "unavailable", "expired"]}
+  },
+  "$defs": {
+    "prompt": {"type": "object", "additionalProperties": true, "properties": {"title": {"type": "string"}, "body": {"type": "string"}, "origin": {"type": "string", "format": "uri"}, "schema": {"$ref": "#/$defs/prompt_schema"}, "controls": {"type": "array", "items": {"type": "object", "additionalProperties": true, "required": ["action", "label"], "properties": {"action": {"type": "string", "minLength": 1}, "label": {"type": "string", "minLength": 1}}}}}},
+    "prompt_schema": {"type": "object", "additionalProperties": true, "properties": {"fields": {"type": "array", "items": {"type": "object", "additionalProperties": true, "required": ["name", "label", "kind", "required"], "properties": {"name": {"type": "string", "minLength": 1}, "label": {"type": "string"}, "kind": {"enum": ["text", "select", "multi_select", "confirm"]}, "required": {"type": "boolean"}, "options": {"type": "array", "items": {"type": "object", "additionalProperties": true, "required": ["value", "label"], "properties": {"value": {"type": "string"}, "label": {"type": "string"}}}}, "default": {}}}}}}
+  }
+}

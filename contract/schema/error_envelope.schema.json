@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/error_envelope.schema.json",
+  "title": "ErrorEnvelope",
+  "description": "Forward-compatible public error envelope. Error codes are stable while messages remain safe presentation text.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["error"],
+  "properties": {
+    "error": {"type": "object", "additionalProperties": true, "required": ["code", "retryable"], "properties": {"code": {"type": "string", "minLength": 1}, "message": {"type": "string"}, "retryable": {"type": "boolean"}}}
+  }
+}

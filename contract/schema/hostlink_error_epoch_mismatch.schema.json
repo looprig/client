@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/hostlink_error_epoch_mismatch.schema.json",
+  "title": "HostLinkErrorEpochMismatch",
+  "description": "Strict typed HostLink refusal that gives the current nonzero lease epoch and no provider or runtime payload.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "current_lease_epoch"],
+  "properties": {
+    "code": {"const": "epoch_mismatch"},
+    "current_lease_epoch": {"type": "integer", "minimum": 1}
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/interrupt_request.schema.json",
+  "title": "InterruptRequest",
+  "description": "Retry-safe durable interrupt command. principal is optional and only ever Factory-stamped; metadata is never carried.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "command_id", "session_id"],
+  "properties": {
+    "version": {"const": 1},
+    "command_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "principal": {"$ref": "#/$defs/principal"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."},
+    "principal": {
+      "type": "object",
+      "description": "The verified sender a Factory stamped after credential verification. Never client-supplied: a Factory refuses a request that carries it.",
+      "additionalProperties": false,
+      "required": ["tenant", "subject", "kind"],
+      "properties": {
+        "tenant": {"$ref": "#/$defs/id"},
+        "subject": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["actor", "service"]}
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/version_negotiation_response_hostlink_methods.schema.json",
+  "title": "VersionNegotiationResponseHostLinkMethods",
+  "description": "The VersionNegotiationResponse a Host sends when it advertises the reserved HostLink methods it serves. Same record and decoder as version_negotiation_response; this pair pins the capability-carrying shape.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version", "hostlink_methods"],
+  "properties": {
+    "version": {"const": 1},
+    "hostlink_methods": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "description": "A reserved HostLink method name such as hostlink.attach; Core enforces the 256-byte identifier limit and tolerates a name it does not know."}
+    }
+  }
+}

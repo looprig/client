@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/object_reference.schema.json",
+  "title": "ObjectReference",
+  "description": "Strict redaction boundary for one logical object identity. It is not a provider URL, credential, backend path, or object bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["object_id"],
+  "properties": {
+    "object_id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."}
+  }
+}

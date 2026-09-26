@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/hostlink_registry_observation.schema.json",
+  "title": "HostLinkRegistryObservation",
+  "description": "Strict current Host-owned session-route observation. It is a routing hint rather than lease ownership proof and cannot describe cold residency.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "tenant_id", "session_id", "host_id", "host_generation", "agent_id", "runtime_compatibility_id", "placement", "internal_endpoint", "residency", "accepting", "lease_epoch", "observed_at", "expires_at"],
+  "properties": {
+    "version": {"const": 1},
+    "tenant_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"},
+    "host_id": {"$ref": "#/$defs/id"},
+    "host_generation": {"type": "integer", "minimum": 1},
+    "agent_id": {"$ref": "#/$defs/id"},
+    "runtime_compatibility_id": {"$ref": "#/$defs/id"},
+    "placement": {"enum": ["pooled", "dedicated"]},
+    "internal_endpoint": {"type": "string", "format": "uri", "description": "Credential-free ws or wss endpoint; Core rejects query, fragment, and userinfo."},
+    "residency": {"enum": ["attaching", "resident", "releasing"]},
+    "accepting": {"type": "boolean"},
+    "lease_epoch": {"type": "integer", "minimum": 1},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 control identity; Core enforces the 256-byte limit."}
+  }
+}

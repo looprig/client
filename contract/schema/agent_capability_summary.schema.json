@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/agent_capability_summary.schema.json",
+  "title": "AgentCapabilitySummary",
+  "description": "Forward-compatible public capability summary without launch internals.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["agent_id", "runtime_compatibility_id"],
+  "properties": {
+    "agent_id": {"$ref": "#/$defs/id"},
+    "runtime_compatibility_id": {"$ref": "#/$defs/id"},
+    "capabilities": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 identity; Core enforces the 256-byte limit."}
+  }
+}

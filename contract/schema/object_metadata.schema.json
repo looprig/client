@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/object_metadata.schema.json",
+  "title": "ObjectMetadata",
+  "description": "Strict redaction boundary for immutable logical object metadata. Signed URLs, secret material, backend paths, and object bytes are not part of this contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reference", "size_bytes"],
+  "properties": {
+    "reference": {"type": "object", "additionalProperties": false, "required": ["object_id"], "properties": {"object_id": {"type": "string", "minLength": 1}}},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "media_type": {"type": "string"},
+    "digest": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"}
+  }
+}

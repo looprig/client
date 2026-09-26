@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/hostlink_command_delivery.schema.json",
+  "title": "HostLinkCommandDelivery",
+  "description": "Strict accepted-command delivery. It contains only the retry-stable public command_id: no runtime UUID, input blocks, private gate values, or raw runtime payload cross HostLink.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command_id"],
+  "properties": {
+    "command_id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 command identity; Core enforces the 256-byte limit."}
+  }
+}

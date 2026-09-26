@@ -1,0 +1,1 @@
+{"accepted_order":4,"command_id":"cmd-gate-1","error":{"code":"command_rejected","message":"The command cannot be applied.","retry_after_ms":250,"retryable":true},"status":"rejected"}

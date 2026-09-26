@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/hostlink_drain_request.schema.json",
+  "title": "HostLinkDrainRequest",
+  "description": "Strict idempotent drain request. Missing tenant_id and session_id means whole-Host scope; when supplied they identify one dedicated-session scope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "host_id", "host_generation", "idempotency_key"],
+  "properties": {
+    "version": {"const": 1},
+    "host_id": {"$ref": "#/$defs/id"},
+    "host_generation": {"type": "integer", "minimum": 1},
+    "idempotency_key": {"$ref": "#/$defs/id"},
+    "tenant_id": {"$ref": "#/$defs/id"},
+    "session_id": {"$ref": "#/$defs/id"}
+  },
+  "anyOf": [
+    {"required": ["tenant_id", "session_id"]},
+    {"not": {"anyOf": [{"required": ["tenant_id"]}, {"required": ["session_id"]}]}}
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "description": "Opaque UTF-8 control identity; Core enforces the 256-byte limit."}
+  }
+}

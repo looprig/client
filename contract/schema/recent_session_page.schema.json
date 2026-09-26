@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/recent_session_page.schema.json",
+  "title": "SessionPage",
+  "description": "Bounded recent-first durable page. The Core decoder verifies non-increasing last_active_at order.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["sessions"],
+  "properties": {
+    "sessions": {"type": "array", "items": {"$ref": "#/$defs/session"}},
+    "next_cursor": {"type": "string"},
+    "previous_cursor": {"type": "string"}
+  },
+  "$defs": {
+    "session": {"type": "object", "additionalProperties": true, "required": ["session_id", "agent_id", "state", "last_active_at"], "properties": {"session_id": {"type": "string", "minLength": 1}, "agent_id": {"type": "string", "minLength": 1}, "state": {"type": "string", "minLength": 1}, "title": {"type": "string"}, "created_at": {"type": "string", "format": "date-time"}, "last_active_at": {"type": "string", "format": "date-time"}}}
+  }
+}

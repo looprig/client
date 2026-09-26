@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://looprig.dev/sessionwire/v1/journal_event.schema.json",
+  "title": "JournalEvent",
+  "description": "Forward-compatible public durable event. body must use the Core transport-canonical JSON spelling; JSON Schema cannot express byte fixed-point canonicality.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["event_id", "journal_seq", "body"],
+  "properties": {
+    "event_id": {"type": "string", "minLength": 1},
+    "journal_seq": {"type": "integer", "minimum": 1},
+    "body": {"not": {"type": "null"}}
+  }
+}
