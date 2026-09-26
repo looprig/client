@@ -8,7 +8,7 @@ Core v0.12.0 supplies 43 schemas and 43 fixtures, including eight new
 principal/metadata schema-and-fixture pairs; the 35 previous fixtures are
 byte-identical to the prior release.
 
-Core is the authority for this contract. WUI keeps an exact local mirror so its
+Core is the authority for this contract. The client keeps an exact local mirror so its
 browser protocol can be reviewed and tested without resolving a sibling checkout.
 The drift guard resolves the published version pinned by `go.mod` with
 `GOWORK=off`, then compares both mirrored trees byte-for-byte in both directions.
@@ -17,9 +17,8 @@ Nothing here is non-test Go source. The direct Core requirement exists only for
 this drift guard, so `go mod tidy` would remove it; use the documented `go get`
 workflow when moving the pin.
 
-Harness-era fixtures retained solely for deprecated `wui.Handler` compatibility
-live under `../legacy-contract/`. They are outside this Core mirror and outside
-the drift guard.
+Harness-era fixtures copied from WUI live under `../legacy-contract/`. They are
+outside this Core mirror and outside the drift guard.
 
 ## Refreshing
 
