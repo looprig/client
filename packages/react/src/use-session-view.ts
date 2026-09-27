@@ -411,8 +411,11 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
   ): Promise<void> {
     const signal = controller.signal;
     try {
+      // Factory reads a request naming no position as the tail, so a walk's
+      // first page names the journal's start (from_seq=0) explicitly.
       const options: FactoryJournalOptions = { limit: this.tailLimit, signal };
       if (started && cursor !== undefined) options.cursor = cursor;
+      else options.fromSeq = 0;
       let raw: PublicJournalPage;
       try {
         raw = await this.reads().readJournal(this.sessionId, options);
@@ -427,7 +430,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
         this.#earlierEvents.clear();
         this.#earlierCursor = undefined;
         this.#earlierStarted = false;
-        raw = await this.reads().readJournal(this.sessionId, { limit: this.tailLimit, signal });
+        raw = await this.reads().readJournal(this.sessionId, { fromSeq: 0, limit: this.tailLimit, signal });
       }
       const page = validateFactory("public_journal_page", raw);
       if (!this.#current(generation, signal)) return;

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- `@looprig/client` exports `contractInfo`, the provenance of its vendored
+  Core contract.
+- `@looprig/react` fixes `browseEarlier`: its first page now requests
+  `from_seq=0`. Factory reads a journal request that names no position as the
+  tail, so the walk previously re-read the newest page, reported `complete`,
+  and never showed earlier history. A cursor restart also resumes from 0.
+
 ## 0.2.0
 
 - `@looprig/client` decodes correlated text and reasoning `TokenDelta` previews

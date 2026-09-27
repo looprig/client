@@ -792,7 +792,9 @@ test("earlier history is never read automatically and starts only on an explicit
   });
   await h.view.current!.browseEarlier();
 
-  expect(h.reads.of("readJournal")[1]?.options).toMatchObject({ limit: 256 });
+  // Factory reads a request naming no position as the TAIL, so the walk's
+  // first page must name the journal's start explicitly.
+  expect(h.reads.of("readJournal")[1]?.options).toMatchObject({ limit: 256, fromSeq: 0 });
   expect(h.reads.of("readJournal")[1]?.options.cursor).toBeUndefined();
   expect(h.reads.of("readJournal")[1]?.options.tail).toBeUndefined();
   expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([1, 2, 8, 9]);
