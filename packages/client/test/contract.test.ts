@@ -4,8 +4,19 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { factorySchemas } from "../src/schema.js";
 import { ContractValidationError, validateFactory, type FactorySchemaName } from "../src/validate.js";
+import { contractInfo } from "../src/index.js";
 const schemaDir = fileURLToPath(new URL("../../../contract/schema/", import.meta.url));
 const fixtureDir = fileURLToPath(new URL("../../../contract/fixtures/", import.meta.url));
+it("exports the vendored Core contract identity", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+  const negotiation = readJson(schemaDir, "version_negotiation_response.schema.json") as { properties: { version: { const: number } } };
+  expect(contractInfo).toEqual({
+    clientVersion: manifest.version,
+    coreVersion: readFileSync(new URL("../../../contract/VERSION", import.meta.url), "utf8").trim(),
+    sessionwireVersion: negotiation.properties.version.const,
+  });
+  expect(Object.isFrozen(contractInfo)).toBe(true);
+});
 function readJson(dir: string, file: string): unknown { return JSON.parse(readFileSync(dir + file, "utf8")); }
 describe("Factory boundary schema subset", () => {
   it("is byte-for-content identical to and validates every corresponding Core fixture", () => {

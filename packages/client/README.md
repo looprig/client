@@ -15,6 +15,9 @@ Use the package root; no deep imports are supported. React adapters are availabl
 in `@looprig/react`. This v0.2.0 surface has no Harness serve transport,
 SSE parser, legacy constructor or serve wire DTOs.
 
+Since v0.3.0, `contractInfo` reports this package's version and the pinned Core
+and sessionwire contract versions.
+
 In v0.2.0, `decodeFactoryLiveDelta` returns a `kind` of `text` or `reasoning`
 for correlated `TokenDelta` chunks. `decodeFactoryLiveText` retains its
 text-only result. An unclassifiable non-object chunk counts as text, matching

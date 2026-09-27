@@ -5,10 +5,13 @@ Two Apache-2.0 libraries, versioned together:
 - `@looprig/client`: framework-neutral Factory REST, ClientLink, commands, Core wire validation, live text and reasoning decoders, and session controllers.
 - `@looprig/react`: React 19 Factory hooks and adapters over the client.
 
-The v0.2.0 API is Factory-native. It includes shared enduring-event, content,
+The v0.3.0 API is Factory-native. It includes shared enduring-event, content,
 row, gate and tool decoders plus Oxy's pending-input, auth, recovery and view
 controllers. Harness `serve` transports, SSE, legacy constructors and their React
 hooks are not part of these packages.
+
+`contractInfo` exports the client package version and the pinned Core and
+sessionwire contract versions used by its validators and fixtures.
 
 From the workspace root:
 

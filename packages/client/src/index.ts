@@ -1,5 +1,6 @@
 /** Framework-neutral Factory client, Core DTOs and shared presentation controllers. */
 export * from "./types.js";
+export { contractInfo } from "./contract-info.js";
 export * from "./validate.js";
 export * from "./errors.js";
 export * from "./transport.js";

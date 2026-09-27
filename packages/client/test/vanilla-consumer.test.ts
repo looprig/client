@@ -415,7 +415,7 @@ describe("the packed @looprig/client artifact", () => {
     // The packed manifest is the one a consumer actually receives, and it is
     // the file a `0.0.0` would sit in. Read from the INSTALLED copy.
     const manifest = readManifest(join(consumerDir, "node_modules/@looprig/client"));
-    expect(manifest.version).toBe("0.2.0");
+    expect(manifest.version).toBe("0.3.0");
     for (const [name, specifier] of Object.entries(manifest.dependencies ?? {})) {
       expect(specifier, `${name} must be an exact published pin`).toMatch(/^\d+\.\d+\.\d+$/);
     }

@@ -75,8 +75,8 @@ try {
         if (new RegExp('\\b' + symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(contents)) throw new Error(`@looprig/${name} packed ${entry} contains removed surface: ${symbol}`);
       }
     }
-    if (manifest.version !== '0.2.0' || manifest.license !== 'Apache-2.0') throw new Error(`@looprig/${name} version/license mismatch`);
-    if (name === 'react' && manifest.dependencies?.['@looprig/client'] !== '0.2.0') throw new Error('React must depend on exact @looprig/client@0.2.0');
+    if (manifest.version !== '0.3.0' || manifest.license !== 'Apache-2.0') throw new Error(`@looprig/${name} version/license mismatch`);
+    if (name === 'react' && manifest.dependencies?.['@looprig/client'] !== '0.3.0') throw new Error('React must depend on exact @looprig/client@0.3.0');
   }
   run(join(consumer, 'node_modules/.bin/tsc'), ['-p', 'tsconfig.json'], consumer);
   run(process.execPath, ['consumer.mjs'], consumer);
