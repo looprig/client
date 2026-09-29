@@ -140,6 +140,12 @@ export function liveToolRows(steps: readonly FactoryLiveToolStep[]): ToolRow[] {
   }));
 }
 
+/** Previews placed after a visible row index, and those whose turn has no visible row. */
+export interface PlacedLivePreviews<P extends FactoryLivePreview> {
+  readonly afterRow: ReadonlyMap<number, readonly P[]>;
+  readonly unplaced: readonly P[];
+}
+
 /**
  * Place each transient preview after its turn's last visible row, or at the
  * visible tail. Text and reasoning are identified by (kind, loopId, turnId):
@@ -153,8 +159,27 @@ export function placeLivePreviews(
   end: number,
   liveText: readonly Omit<FactoryLiveTextPreview, 'kind'>[],
   liveReasoning: readonly Omit<FactoryLiveTextPreview, 'kind'>[],
+): PlacedLivePreviews<FactoryLiveTextPreview>;
+/**
+ * With live tool rows the placement is the widened `FactoryLivePreview` union;
+ * the five-argument form keeps the 0.2.0 text/reasoning-only result type.
+ */
+export function placeLivePreviews(
+  rows: readonly { readonly loopId: string; readonly turnId: string }[],
+  start: number,
+  end: number,
+  liveText: readonly Omit<FactoryLiveTextPreview, 'kind'>[],
+  liveReasoning: readonly Omit<FactoryLiveTextPreview, 'kind'>[],
+  liveToolSteps: readonly ToolRow[],
+): PlacedLivePreviews<FactoryLivePreview>;
+export function placeLivePreviews(
+  rows: readonly { readonly loopId: string; readonly turnId: string }[],
+  start: number,
+  end: number,
+  liveText: readonly Omit<FactoryLiveTextPreview, 'kind'>[],
+  liveReasoning: readonly Omit<FactoryLiveTextPreview, 'kind'>[],
   liveToolSteps: readonly ToolRow[] = [],
-): { readonly afterRow: ReadonlyMap<number, readonly FactoryLivePreview[]>; readonly unplaced: readonly FactoryLivePreview[] } {
+): PlacedLivePreviews<FactoryLivePreview> {
   const lastVisibleRow = new Map<string, number>();
   for (let index = start; index < end; index++) {
     const row = rows[index];

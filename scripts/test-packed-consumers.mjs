@@ -90,7 +90,11 @@ try {
     compilerOptions: { target: 'ES2022', lib: ['ES2022', 'DOM'], module: 'ESNext', moduleResolution: 'bundler', strict: true, noEmit: true, skipLibCheck: true },
     include: ['consumer.ts'],
   }));
-  writeFileSync(join(vanilla, 'consumer.ts'), `import { createFactoryClient, decodeFactoryLiveDelta, placeLivePreviews, livePreviewKey, uuidV4, type FactoryClient } from '@looprig/client';\nconst client: FactoryClient = createFactoryClient();\nvoid [client, decodeFactoryLiveDelta, placeLivePreviews, livePreviewKey, uuidV4];\n`);
+  writeFileSync(join(vanilla, 'consumer.ts'), `import { createFactoryClient, decodeFactoryLiveDelta, liveToolRows, placeLivePreviews, livePreviewKey, uuidV4, type FactoryClient } from '@looprig/client';\nconst client: FactoryClient = createFactoryClient();\nvoid [client, decodeFactoryLiveDelta, placeLivePreviews, livePreviewKey, uuidV4];\n`
+    // 0.2.0-style five-argument placement: every placed preview still has text.
+    + `const legacy = placeLivePreviews([], 0, 0, [{ loopId: 'l', turnId: 't', text: 'a' }], []);\nconst texts: string[] = legacy.unplaced.map((p) => p.text);\nvoid texts;\n`
+    // The six-argument form is the widened union; a tool preview has no text.
+    + `const widened = placeLivePreviews([], 0, 0, [], [], liveToolRows([]));\n// @ts-expect-error a tool preview has no text\nvoid widened.unplaced.map((p) => p.text);\n`);
   writeFileSync(join(vanilla, 'consumer.mjs'), `import { createFactoryClient, decodeFactoryLiveDelta, decodeFactoryLiveToolStep, liveToolRows, placeLivePreviews, livePreviewKey } from '@looprig/client';\nif (typeof createFactoryClient().idGenerator() !== 'string' || typeof decodeFactoryLiveDelta !== 'function' || typeof decodeFactoryLiveToolStep !== 'function' || typeof liveToolRows !== 'function' || typeof placeLivePreviews !== 'function' || typeof livePreviewKey !== 'function') throw Error('client runtime export');\n`);
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], vanilla);
   run(join(vanilla, 'node_modules/.bin/tsc'), ['-p', 'tsconfig.json'], vanilla);

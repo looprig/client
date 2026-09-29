@@ -97,6 +97,23 @@ describe('Factory conversation view', () => {
     expect(placeLivePreviews(rows, 0, 2, [], []).afterRow.size).toBe(0);
   });
 
+  it('keeps the 0.2.0 text-only result type for the five-argument call', () => {
+    const turn = { loopId: LOOP, turnId: uuid(1) };
+    // 0.2.0-style code: every placed preview has text. This line must compile.
+    const legacy = placeLivePreviews([], 0, 0, [{ ...turn, text: 'answer' }], [{ ...turn, text: 'thought' }]);
+    const texts: string[] = legacy.unplaced.map((preview) => preview.text);
+    const kinds: ('text' | 'reasoning')[] = [...legacy.afterRow.values()].flat().map((preview) => preview.kind);
+    expect(texts).toEqual(['thought', 'answer']);
+    expect(kinds).toEqual([]);
+    const [row] = liveToolRows([{
+      phase: 'started', ...turn, stepId: '', toolExecutionId: uuid(10), toolUseId: 'toolu_1', toolName: 'Bash',
+      summary: '', isError: false, resultPreview: '',
+    }]);
+    const widened = placeLivePreviews([], 0, 0, [], [], [row!]);
+    // @ts-expect-error the six-argument result may hold a tool preview, which has no text
+    expect(widened.unplaced.map((preview) => preview.text)).toEqual([undefined]);
+  });
+
   it('identifies a live tool preview by its execution id', () => {
     const [row] = liveToolRows([{
       phase: 'started', loopId: LOOP, turnId: uuid(1), stepId: '', toolExecutionId: uuid(7), toolUseId: '',

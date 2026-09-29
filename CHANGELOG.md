@@ -36,7 +36,11 @@
   exhaustive `switch (preview.kind)` must add a `"tool"` arm.
   `placeLivePreviews` takes an optional sixth `liveToolSteps` argument and places
   tool previews after reasoning and text within a turn; `livePreviewKey` for a
-  tool preview is `tool:<toolExecutionId>`.
+  tool preview is `tool:<toolExecutionId>`. It is overloaded: the 0.2.0
+  five-argument call still returns only `FactoryLiveTextPreview`s (so
+  `unplaced.map((p) => p.text)` keeps compiling), and only the six-argument
+  call returns the widened union. The result type is exported as
+  `PlacedLivePreviews<P>`.
 - `@looprig/react` exposes a **required** `liveToolSteps` array on
   `UseFactorySessionViewResult` (consumers constructing the type add
   `liveToolSteps: []`). A Completed whose Started was lost creates the step; a
