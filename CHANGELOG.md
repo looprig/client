@@ -27,7 +27,8 @@
   keyed by `toolExecutionId`. Harness v0.42.0 adds the `tool_use_id` join key
   (both) and `tool_name`/`elapsed_ms` (Completed); older bodies decode with
   those empty or absent. The summary is capped at 4 KiB, the result preview at
-  16 KiB; any other body, including `TokenDelta`, returns null.
+  16 KiB; any other body, including `TokenDelta`, returns null. An absent
+  `is_error` means success; an explicit `null` or non-boolean is refused.
   `liveToolRows` maps steps to live `ToolRow`s (`live: true`, no journal
   sequence, status `running`/`ok`/`error`).
 - **`FactoryLivePreview` is now a union** that adds `{ kind: "tool", loopId,

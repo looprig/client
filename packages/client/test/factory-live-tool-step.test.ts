@@ -82,6 +82,9 @@ test.each<[string, Record<string, unknown>]>([
 
 test.each<[string, Record<string, unknown>]>([
   ["non-boolean is_error", { is_error: "yes" }],
+  ["numeric is_error", { is_error: 0 }],
+  ["null is_error", { is_error: null }],
+  ["null elapsed_ms", { elapsed_ms: null }],
   ["non-string result_preview", { result_preview: 3 }],
   ["oversized result_preview", { result_preview: "r".repeat(MAX_FACTORY_LIVE_TOOL_RESULT_BYTES + 1) }],
   ["negative elapsed_ms", { elapsed_ms: -1 }],

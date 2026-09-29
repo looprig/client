@@ -75,7 +75,9 @@ export function decodeFactoryLiveToolStep(body: unknown, publicSessionId: string
     return { phase: "started", ...common, summary, isError: false, resultPreview: "" };
   }
   const resultPreview = optionalString(value["result_preview"]);
-  const isError = value["is_error"] ?? false;
+  // Only an absent member defaults; an explicit null is malformed, not success.
+  const rawIsError = value["is_error"];
+  const isError = rawIsError === undefined ? false : rawIsError;
   const elapsed = value["elapsed_ms"];
   if (resultPreview === null || encoder.encode(resultPreview).byteLength > MAX_FACTORY_LIVE_TOOL_RESULT_BYTES
     || typeof isError !== "boolean"
