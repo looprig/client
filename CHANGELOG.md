@@ -16,7 +16,7 @@
   floor it reached, so the next call continues from there.
   Factory has no backward page, so a window is read with bounded forward
   `from_seq` reads (several if Factory clamps `limit`, each required to advance
-  `covered_through`, at most `maxTailPages` per action under one 1 MiB byte
+  `covered_through`, at most `maxTailPages` reads under one 1 MiB byte
   budget per action) and is shown whole or not at all. Records already loaded are
   de-duplicated, and live records arriving meanwhile are kept. This replaces
   the 0.2.0 walk forward from the journal start, which kept only one
