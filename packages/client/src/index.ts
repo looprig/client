@@ -39,6 +39,7 @@ export * from "./toolsummary.js";
 export * from "./fold.js";
 export * from "./join.js";
 export * from "./factory-live-text.js";
+export * from "./factory-live-tool-step.js";
 export * from "./pending-store.js";
 export * from "./store.js";
 export * from "./content.js";

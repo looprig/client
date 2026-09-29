@@ -1,6 +1,8 @@
 import { decodeEnduring } from './enduring.js';
 import { emptyPublicGateBoard, emptySessionView, fold, foldPublicGateEvent, foldPublicGatePage, publicGateKey, type PublicGateBoard, type SessionView } from './fold.js';
 import type { EventEnvelope, FactorySessionStatus, PublicGatePage, PublicJournalPage, StatusEvent } from './types.js';
+import type { FactoryLiveToolStep } from './factory-live-tool-step.js';
+import type { ToolRow } from './rows.js';
 
 export type PublicJournalEvent = PublicJournalPage['events'][number];
 
@@ -81,30 +83,77 @@ export function historyGapRowIndex(rows: readonly { journalSeq: number | undefin
   return index === -1 ? (rows.length > 0 ? rows.length : undefined) : index;
 }
 
-export interface FactoryLivePreview {
+/** A live text or reasoning preview: the uncommitted text of one loop's turn. */
+export interface FactoryLiveTextPreview {
   readonly kind: 'text' | 'reasoning';
   readonly loopId: string;
   readonly turnId: string;
   readonly text: string;
 }
 
-/** A preview's identity is its kind, loopId and turnId; its text may change. */
+/** A live tool step, as the `ToolRow` it will be replaced by once committed. */
+export interface FactoryLiveToolPreview {
+  readonly kind: 'tool';
+  readonly loopId: string;
+  readonly turnId: string;
+  readonly row: ToolRow;
+}
+
+/**
+ * A transient preview placed among the folded rows. Widened in 0.3.0 with
+ * `'tool'`: an exhaustive `switch (preview.kind)` must add that arm.
+ */
+export type FactoryLivePreview = FactoryLiveTextPreview | FactoryLiveToolPreview;
+
+/**
+ * A preview's identity. Text and reasoning are identified by kind, loopId and
+ * turnId (their text may change); a tool step by its `toolExecutionId` (its
+ * status and result may change).
+ */
 export function livePreviewKey(preview: FactoryLivePreview): string {
+  if (preview.kind === 'tool') return `tool:${preview.row.toolExecutionId}`;
   return `${preview.kind}:${preview.loopId}\0${preview.turnId}`;
 }
 
 /**
+ * Maps live tool steps to the `ToolRow`s a renderer already draws. A live row
+ * has no journal sequence and no ordinal (-1), and `live: true` marks it; its
+ * summary is harness's redacted audit summary and its result the bounded
+ * preview. The committed row that replaces it shares its `toolUseId`.
+ */
+export function liveToolRows(steps: readonly FactoryLiveToolStep[]): ToolRow[] {
+  return steps.map((step) => ({
+    kind: 'tool',
+    ordinal: -1,
+    loopId: step.loopId,
+    turnId: step.turnId,
+    journalSeq: undefined,
+    live: true,
+    orphanedLoop: false,
+    toolUseId: step.toolUseId,
+    toolExecutionId: step.toolExecutionId,
+    toolName: step.toolName,
+    summary: step.summary,
+    status: step.phase === 'started' ? 'running' : step.isError ? 'error' : 'ok',
+    result: step.resultPreview,
+    spawnedLoopId: '',
+  }));
+}
+
+/**
  * Place each transient preview after its turn's last visible row, or at the
- * visible tail. Its identity is (kind, loopId, turnId): reasoning and text for
- * the same turn are distinct previews. Unplaced turns retain first-seen order,
- * with reasoning before text within each turn.
+ * visible tail. Text and reasoning are identified by (kind, loopId, turnId):
+ * reasoning and text for the same turn are distinct previews; a tool preview
+ * is one per `ToolRow`. Within a turn the order is reasoning, then text, then
+ * tool steps in the order given. Unplaced turns retain first-seen order.
  */
 export function placeLivePreviews(
   rows: readonly { readonly loopId: string; readonly turnId: string }[],
   start: number,
   end: number,
-  liveText: readonly Omit<FactoryLivePreview, 'kind'>[],
-  liveReasoning: readonly Omit<FactoryLivePreview, 'kind'>[],
+  liveText: readonly Omit<FactoryLiveTextPreview, 'kind'>[],
+  liveReasoning: readonly Omit<FactoryLiveTextPreview, 'kind'>[],
+  liveToolSteps: readonly ToolRow[] = [],
 ): { readonly afterRow: ReadonlyMap<number, readonly FactoryLivePreview[]>; readonly unplaced: readonly FactoryLivePreview[] } {
   const lastVisibleRow = new Map<string, number>();
   for (let index = start; index < end; index++) {
@@ -113,15 +162,16 @@ export function placeLivePreviews(
   }
   const afterRow = new Map<number, FactoryLivePreview[]>();
   const unplacedByTurn = new Map<string, FactoryLivePreview[]>();
+  const place = (item: FactoryLivePreview): void => {
+    const turnKey = `${item.loopId}\0${item.turnId}`;
+    const index = lastVisibleRow.get(turnKey);
+    if (index === undefined) unplacedByTurn.set(turnKey, [...(unplacedByTurn.get(turnKey) ?? []), item]);
+    else afterRow.set(index, [...(afterRow.get(index) ?? []), item]);
+  };
   for (const [kind, previews] of [['reasoning', liveReasoning], ['text', liveText]] as const) {
-    for (const preview of previews) {
-      const item = { ...preview, kind };
-      const turnKey = `${preview.loopId}\0${preview.turnId}`;
-      const index = lastVisibleRow.get(turnKey);
-      if (index === undefined) unplacedByTurn.set(turnKey, [...(unplacedByTurn.get(turnKey) ?? []), item]);
-      else afterRow.set(index, [...(afterRow.get(index) ?? []), item]);
-    }
+    for (const preview of previews) place({ ...preview, kind });
   }
+  for (const row of liveToolSteps) place({ kind: 'tool', loopId: row.loopId, turnId: row.turnId, row });
   return { afterRow, unplaced: [...unplacedByTurn.values()].flat() };
 }
 

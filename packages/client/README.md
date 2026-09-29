@@ -28,3 +28,10 @@ A preview's identity is (`kind`, `loopId`, `turnId`); use `livePreviewKey` to
 derive it. `placeLivePreviews` positions both kinds after the last visible row
 for their loop and turn, or at the visible tail. Unplaced turns keep first-seen
 order, with reasoning before text within each turn.
+
+Since v0.3.0, `decodeFactoryLiveToolStep` decodes harness's public
+`ToolCallStarted`/`ToolCallCompleted` bodies (summary ≤ 4 KiB, result preview
+≤ 16 KiB); `liveToolRows` maps them to live `ToolRow`s, and `placeLivePreviews`
+places them, after reasoning and text, through its optional sixth argument.
+`FactoryLivePreview` now includes `kind: "tool"` previews, identified by
+`toolExecutionId`.

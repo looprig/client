@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { advanceGateBoardCell, createPublicEventFolder, emptyGateBoardState, foldGateBoard, historyGapStart, historyGapRowIndex, livePreviewKey, nextTailStart, placeLivePreviews, statusRunning, type PublicGatePage, type PublicJournalEvent } from '../src/index.js';
+import { advanceGateBoardCell, createPublicEventFolder, emptyGateBoardState, foldGateBoard, historyGapStart, historyGapRowIndex, liveToolRows, livePreviewKey, nextTailStart, placeLivePreviews, statusRunning, type FactoryLiveToolStep, type PublicGatePage, type PublicJournalEvent } from '../src/index.js';
 
 const SID = '11111111-1111-4111-8111-111111111111';
 const LOOP = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
@@ -75,6 +75,37 @@ describe('Factory conversation view', () => {
     expect(livePreviewKey({ ...preview, kind: 'reasoning' })).not.toBe(livePreviewKey(preview));
     expect(livePreviewKey({ ...preview, loopId: uuid(2) })).not.toBe(livePreviewKey(preview));
     expect(livePreviewKey({ ...preview, turnId: uuid(2) })).not.toBe(livePreviewKey(preview));
+  });
+
+  it('places live tool steps after reasoning and text within their turn, in the order given', () => {
+    const turn = { loopId: LOOP, turnId: uuid(1) };
+    const step = (n: number, phase: 'started' | 'completed'): FactoryLiveToolStep => ({
+      phase, ...turn, stepId: uuid(3), toolExecutionId: uuid(10 + n), toolUseId: `toolu_${n}`, toolName: 'Bash',
+      summary: `cmd ${n}`, isError: false, resultPreview: phase === 'completed' ? 'ok' : '',
+    });
+    const [first, second] = liveToolRows([step(1, 'completed'), step(2, 'started')]);
+    const rows = [{ ...turn }, { loopId: uuid(9), turnId: uuid(1) }];
+    const placed = placeLivePreviews(rows, 0, 2, [{ ...turn, text: 'answer' }], [{ ...turn, text: 'thought' }], [first!, second!]);
+    expect(placed.afterRow.get(0)?.map((preview) => preview.kind)).toEqual(['reasoning', 'text', 'tool', 'tool']);
+    expect(placed.afterRow.get(0)?.slice(2)).toEqual([
+      { kind: 'tool', ...turn, row: first },
+      { kind: 'tool', ...turn, row: second },
+    ]);
+    const unplaced = placeLivePreviews([], 0, 0, [{ ...turn, text: 'answer' }], [], [second!]);
+    expect(unplaced.unplaced.map((preview) => preview.kind)).toEqual(['text', 'tool']);
+    // The default keeps the 0.2.0 five-argument call working.
+    expect(placeLivePreviews(rows, 0, 2, [], []).afterRow.size).toBe(0);
+  });
+
+  it('identifies a live tool preview by its execution id', () => {
+    const [row] = liveToolRows([{
+      phase: 'started', loopId: LOOP, turnId: uuid(1), stepId: '', toolExecutionId: uuid(7), toolUseId: '',
+      toolName: 'Read', summary: '', isError: false, resultPreview: '',
+    }]);
+    const preview = { kind: 'tool' as const, loopId: LOOP, turnId: uuid(1), row: row! };
+    expect(livePreviewKey(preview)).toBe(`tool:${uuid(7)}`);
+    expect(livePreviewKey({ ...preview, row: { ...row!, status: 'ok', result: 'done' } })).toBe(livePreviewKey(preview));
+    expect(livePreviewKey({ ...preview, row: { ...row!, toolExecutionId: uuid(8) } })).not.toBe(livePreviewKey(preview));
   });
 
   it('groups unplaced previews by turn in first-seen order with reasoning before text', () => {
