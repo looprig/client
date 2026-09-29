@@ -9,13 +9,15 @@
   tail, so the walk previously re-read the newest page, reported `complete`,
   and never showed earlier history. A cursor restart also resumes from 0.
 - `@looprig/react` pages earlier history BACKWARD. Each `browseEarlier()` call
-  reads the window of at most `tailLimit` records immediately before the
-  oldest loaded record and prepends its public events; repeated calls
-  accumulate windows until sequence 1, when `earlierState` is `"complete"`.
+  reads windows of at most `tailLimit` records backward from the oldest loaded
+  record until one holds a public event (or sequence 1 is reached) and
+  prepends what it found; repeated calls accumulate until sequence 1, when
+  `earlierState` is `"complete"`. A call stopped by its page bound keeps the
+  floor it reached, so the next call continues from there.
   Factory has no backward page, so a window is read with bounded forward
   `from_seq` reads (several if Factory clamps `limit`, each required to advance
   `covered_through`, at most `maxTailPages` per action under one 1 MiB byte
-  budget) and is shown whole or not at all. Records already loaded are
+  budget per action) and is shown whole or not at all. Records already loaded are
   de-duplicated, and live records arriving meanwhile are kept. This replaces
   the 0.2.0 walk forward from the journal start, which kept only one
   replaceable page and followed opaque cursors; no cursor is sent now.

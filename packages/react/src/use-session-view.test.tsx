@@ -834,25 +834,74 @@ test("earlier history pages backward one window per action and accumulates until
   expect(h.reads.of("readJournal")).toHaveLength(5);
 });
 
-test("an earlier window of only private records still advances the floor", async () => {
+test("one earlier action pages past private-only windows until it finds a public event", async () => {
   const h = await mountFactoryView({ props: { tailLimit: 3 }, setup: (link, reads) => {
     link.holdConnect = true;
-    setPage(reads, 9, [8, 9]);
+    setPage(reads, 12, [11, 12]);
   } });
-  await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(12);
 
-  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 7, events: [] });
+  h.reads.queue("readJournal", { journal_tip: 12, covered_through: 10, events: [] });
+  h.reads.queue("readJournal", { journal_tip: 12, covered_through: 7, events: [] });
+  h.reads.queue("readJournal", { journal_tip: 12, covered_through: 4, events: [publicEvent(3)] });
   await h.view.current!.browseEarlier();
-  expect(h.reads.of("readJournal")[1]?.options).toMatchObject({ fromSeq: 5, limit: 3 });
-  expect(h.view.current?.earlierState).toBe("available");
-  expect(h.view.current?.earlierFrom).toBe(5);
-  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([8, 9]);
 
-  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 4, events: [publicEvent(3)] });
-  await h.view.current!.browseEarlier();
-  expect(h.reads.of("readJournal")[2]?.options).toMatchObject({ fromSeq: 2, limit: 3 });
-  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([3, 8, 9]);
+  expect(h.reads.of("readJournal").slice(1).map((call) => call.options)).toMatchObject([
+    { fromSeq: 8, limit: 3 }, { fromSeq: 5, limit: 3 }, { fromSeq: 2, limit: 3 },
+  ]);
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([3, 11, 12]);
+  expect(h.view.current?.earlierFrom).toBe(2);
   expect(h.view.current?.earlierState).toBe("available");
+
+  // Only sequence 1 remains: the next action reads it and completes.
+  h.reads.queue("readJournal", { journal_tip: 12, covered_through: 1, events: [] });
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal").at(-1)?.options).toMatchObject({ fromSeq: 1, limit: 1 });
+  expect(h.view.current?.earlierState).toBe("complete");
+  expect(h.view.current?.earlierFrom).toBe(1);
+});
+
+test("an earlier action stopped by its page bound keeps the floor it reached", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 2, maxTailPages: 3 }, setup: (link, reads) => {
+    link.holdConnect = true;
+    setPage(reads, 20, [20]);
+  } });
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(20);
+
+  h.reads.queue("readJournal", { journal_tip: 20, covered_through: 19, events: [] });
+  h.reads.queue("readJournal", { journal_tip: 20, covered_through: 17, events: [] });
+  h.reads.queue("readJournal", { journal_tip: 20, covered_through: 15, events: [] });
+  await h.view.current!.browseEarlier();
+
+  expect(h.reads.of("readJournal")).toHaveLength(4);
+  expect(h.view.current?.earlierFrom).toBe(14);
+  expect(h.view.current?.earlierState).toBe("available");
+  expect(h.view.current?.error).toBeNull();
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([20]);
+
+  // The next action continues from the floor reached, not from the tail.
+  h.reads.queue("readJournal", { journal_tip: 20, covered_through: 13, events: [publicEvent(13)] });
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal").at(-1)?.options).toMatchObject({ fromSeq: 12, limit: 2 });
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([13, 20]);
+  expect(h.view.current?.earlierFrom).toBe(12);
+});
+
+test("a window left partly covered by the page bound is discarded but earlier covered windows are kept", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 4, maxTailPages: 2 }, setup: (link, reads) => {
+    link.holdConnect = true;
+    setPage(reads, 20, [20]);
+  } });
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(20);
+
+  h.reads.queue("readJournal", { journal_tip: 20, covered_through: 19, events: [] });
+  // Clamped: covers 12..13 of the window 12..15, and holds a public event.
+  h.reads.queue("readJournal", { journal_tip: 20, covered_through: 13, events: [publicEvent(13)] });
+  await h.view.current!.browseEarlier();
+
+  expect(h.view.current?.earlierFrom).toBe(16);
+  expect(h.view.current?.earlierState).toBe("available");
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([20]);
 });
 
 test("a view whose tail holds only private records pages back from its coverage watermark", async () => {

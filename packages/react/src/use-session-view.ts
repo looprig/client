@@ -203,10 +203,13 @@ export interface UseFactorySessionViewResult {
    */
   readonly earlierFrom?: number | null;
   /**
-   * Reads the window of at most `tailLimit` records immediately BEFORE the
-   * oldest loaded record and prepends its public events. Each call reads one
-   * window; call again to page further back until `earlierState` is
-   * `"complete"`. A call before the first durable snapshot is a no-op.
+   * Reads windows of at most `tailLimit` records backward from the oldest
+   * loaded record until one holds a public event (or sequence 1 is reached),
+   * and prepends what it found. Bounded per call by `maxTailPages` reads and
+   * the earlier-history byte budget; a call stopped by the page bound keeps
+   * the floor it reached. Call again to page further back until
+   * `earlierState` is `"complete"`. A call before the first durable snapshot
+   * is a no-op.
    */
   readonly browseEarlier: () => Promise<void>;
 }
@@ -229,9 +232,11 @@ type FactorySessionViewSnapshot = Omit<UseFactorySessionViewResult, "browseEarli
 // `from_seq = max(1, floor - tailLimit)`: sequences are dense, so a window is
 // covered exactly once `covered_through` reaches `floor - 1`. Factory clamps
 // `limit` (to 100 today), so a window may take several forward reads; each
-// must advance coverage, the action is bounded by `maxTailPages` reads and one
-// encoded-event byte ceiling, and a window is committed whole or not at all,
-// so the view never shows a hole inside loaded history. Events at or above the
+// must advance coverage. One action keeps reading windows backward until one
+// holds a public event or sequence 1 is reached, bounded by `maxTailPages`
+// reads and one encoded-event byte ceiling; a window is committed whole or not
+// at all, so the view never shows a hole inside loaded history, and windows
+// covered before a bound or failure are kept so the next action continues. Events at or above the
 // floor are already loaded and are dropped (a current event also wins any
 // duplicate in `#ordered`).
 //
@@ -434,17 +439,67 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     return floor;
   }
 
+  /**
+   * Reads window after window backward from `floor` until one holds a public
+   * event or sequence 1 is reached, within one action's page and byte bounds.
+   * Each fully covered window is committed; a partly covered one never is.
+   * Hitting the page bound after at least one covered window stops quietly at
+   * the floor reached, so the next action continues from there.
+   */
   async #readEarlier(generation: number, controller: AbortController, floor: number): Promise<void> {
     const signal = controller.signal;
+    const progress = { reached: floor, found: new Map<number, PublicJournalEvent>() };
     try {
+      let failure: unknown;
+      try {
+        await this.#walkEarlier(generation, signal, progress);
+      } catch (cause) {
+        if (this.#rejectAccess(cause, generation, signal)) return;
+        failure = cause;
+      }
+      if (!this.#current(generation, signal)) return;
+      // Windows covered before a failure are whole, so they are kept either way.
+      const { reached, found } = progress;
+      if (reached < floor) {
+        for (const [sequence, event] of found) this.#earlierEvents.set(sequence, event);
+        this.#earlierFloor = reached;
+      }
+      this.publish({
+        ...(reached < floor ? { events: this.#ordered(), earlierFrom: reached } : {}),
+        earlierState: failure !== undefined ? "failed" : reached <= 1 ? "complete" : "available",
+        error: failure === undefined ? null : asError(failure),
+      });
+    } finally {
+      controller.abort();
+    }
+  }
+
+  /**
+   * Reads window after window backward from `progress.reached` until one holds
+   * a public event or sequence 1 is reached, within one action's page and byte
+   * bounds. Only a fully covered window moves `progress`; a partly covered one
+   * is discarded. Hitting the page bound after at least one covered window
+   * stops quietly at the floor reached, so the next action continues there.
+   */
+  async #walkEarlier(
+    generation: number,
+    signal: AbortSignal,
+    progress: { reached: number; readonly found: Map<number, PublicJournalEvent> },
+  ): Promise<void> {
+    const start = progress.reached;
+    let pages = 0;
+    let bytes = 0;
+    while (progress.reached > 1 && progress.found.size === 0) {
+      const floor = progress.reached;
       const from = Math.max(1, floor - this.tailLimit);
       const window = new Map<number, PublicJournalEvent>();
       let next = from;
-      let bytes = 0;
-      for (let pages = 0; next < floor; pages++) {
+      while (next < floor) {
         if (pages >= this.tailBounds.maxPages) {
+          if (floor < start) return;
           throw new Error(`factory earlier history window not covered within ${this.tailBounds.maxPages} pages`);
         }
+        pages++;
         const limit = floor - next;
         const page = validateFactory(
           "public_journal_page",
@@ -466,21 +521,8 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
         }
         next = page.covered_through + 1;
       }
-      for (const [sequence, event] of window) this.#earlierEvents.set(sequence, event);
-      this.#earlierFloor = from;
-      this.publish({
-        events: this.#ordered(),
-        earlierState: from <= 1 ? "complete" : "available",
-        earlierFrom: from,
-        error: null,
-      });
-    } catch (cause) {
-      if (this.#rejectAccess(cause, generation, signal)) return;
-      if (this.#current(generation, signal)) {
-        this.publish({ earlierState: "failed", error: asError(cause) });
-      }
-    } finally {
-      controller.abort();
+      for (const [sequence, event] of window) progress.found.set(sequence, event);
+      progress.reached = from;
     }
   }
 

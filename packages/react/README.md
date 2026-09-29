@@ -10,8 +10,9 @@ v0.2.0; consumers constructing this result type must supply an empty array
 when no preview exists. Host reasoning publication itself is optional.
 Text and reasoning each have their own 64 KiB byte budget and 16-key cap.
 `browseEarlier()` pages earlier history backward on demand: each call reads
-the window of at most `tailLimit` records before the oldest loaded one (bounded
-forward `from_seq` reads; no Factory change needed) and prepends it, until
+windows of at most `tailLimit` records before the oldest loaded one (bounded
+forward `from_seq` reads; no Factory change needed) until it finds a public
+event, and prepends them, until
 `earlierState` is `"complete"` at sequence 1. `earlierFrom` reports the lowest
 contiguously loaded sequence.
 `useFactoryComposer`, `useFactoryGate`, and `useFactoryInterrupt` retain command
