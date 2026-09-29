@@ -46,7 +46,12 @@
   `liveToolSteps: []`). A Completed whose Started was lost creates the step; a
   committed `StepDone` removes the steps whose `toolUseId` it commits, then
   those in its own loop, turn and step, in the same snapshot as the folded
-  row, so a call never renders twice. Turn terminals remove the turn's steps,
+  row, so a call never renders twice. A late step that a loaded `StepDone`
+  already commits (by `tool_use_id`, or by loop, turn and step) is ignored too,
+  whether that record came from the live stream, the REST journal catch-up or
+  an earlier-history page, and across reconnects; the knowledge is derived from
+  the loaded events and is rebuilt when a lowered reset or history reset drops
+  them. Turn terminals remove the turn's steps,
   and a late step for an ended turn or a stopped session is ignored.
   Reset, repair, reconnect, stop, identity change and access revocation clear
   every step. At most 64 steps are kept, evicting the oldest completed, then

@@ -188,7 +188,8 @@ export interface UseFactorySessionViewResult {
   /**
    * Uncommitted tool-call steps from this join generation, in first-seen
    * order, at most `MAX_LIVE_TOOL_STEPS`. A step is replaced by its committed
-   * `StepDone` (joined by `toolUseId`, else by loop, turn and step), vanishes
+   * `StepDone` (joined by `toolUseId`, else by loop, turn and step) — and one
+   * a loaded `StepDone` already commits is never admitted — vanishes
    * at its turn's terminal, and clears on stop, reset, repair or reconnect.
    * Map with `liveToolRows` to render it as a `ToolRow`.
    */
@@ -290,6 +291,18 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
   /** Live tool steps by `toolExecutionId`, in first-seen order. */
   readonly #liveToolSteps = new Map<string, FactoryLiveToolStep>();
   readonly #endedTurns = new Set<string>();
+  /**
+   * `tool_use` ids and `loop:turn:step` scopes of the StepDone records this
+   * view holds (current and earlier history). A live step they already commit
+   * is refused, so a Completed delayed behind a StepDone the REST join already
+   * captured never renders next to its committed row. Derived from the loaded
+   * events alone, so it is bounded by them: an insert adds to it, and any
+   * removal (lowered reset, earlier-history reset, revocation) marks it stale
+   * for a rebuild from what is still loaded.
+   */
+  readonly #committedToolUseIds = new Set<string>();
+  readonly #committedStepScopes = new Set<string>();
+  #committedStale = false;
   readonly #suppressedLiveKeys = new Set<string>();
   #sessionStopped = false;
   #joinGeneration = 0;
@@ -477,7 +490,10 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
       // Windows covered before a failure are whole, so they are kept either way.
       const { reached, found } = progress;
       if (reached < floor) {
-        for (const [sequence, event] of found) this.#earlierEvents.set(sequence, event);
+        for (const [sequence, event] of found) {
+          this.#earlierEvents.set(sequence, event);
+          this.#noteCommitted(event.body);
+        }
         this.#earlierFloor = reached;
       }
       this.publish({
@@ -555,6 +571,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     // deletion does, because retaining its projection would render a session
     // Factory has authoritatively said no longer exists.
     this.#currentEvents.clear();
+    this.#committedStale = true;
     this.#resetEarlier();
     this.#gates = null;
     this.#resetLivePreviews(false);
@@ -618,7 +635,10 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
       if (captured === undefined) {
         throw new Error(`factory captured tail refused (${step.kind === "refused" ? step.reason : step.kind}) before reaching journal_tip ${tail.tip}`);
       }
-      for (const event of captured.events) this.#currentEvents.set(event.journal_seq, event);
+      for (const event of captured.events) {
+        this.#currentEvents.set(event.journal_seq, event);
+        this.#noteCommitted(event.body);
+      }
       this.#adoptGates(gateTicket, gatePage);
       this.publish({
         state: "ready", status: projection, gates: this.#gates, events: this.#ordered(),
@@ -742,7 +762,10 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
           const ceiling = projected && lowered
             ? event.coveredThrough : event.status.journal_tip;
           for (const sequence of this.#currentEvents.keys()) {
-            if (sequence > ceiling) this.#currentEvents.delete(sequence);
+            if (sequence > ceiling) {
+              this.#currentEvents.delete(sequence);
+              this.#committedStale = true;
+            }
           }
           if (lowered) {
             this.#resetEarlier();
@@ -751,6 +774,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
           projected = true;
         } else if (event.kind === "public") {
           this.#currentEvents.set(event.event.journal_seq, event.event);
+          this.#noteCommitted(event.event.body);
           this.#reconcileLivePreviews(event.event.body);
         }
         liveCoverage = event.coveredThrough;
@@ -802,6 +826,8 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
    */
   #admitToolStep(step: FactoryLiveToolStep): boolean {
     if (this.#sessionStopped || this.#endedTurns.has(`${step.loopId}:${step.turnId}`)) return false;
+    // Already committed (§5 rule 7): the folded row is the truth.
+    if (this.#commitsToolStep(step)) return this.#liveToolSteps.delete(step.toolExecutionId);
     const prior = this.#liveToolSteps.get(step.toolExecutionId);
     if (prior !== undefined) {
       // A Started arriving after its Completed never regresses the step.
@@ -834,10 +860,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
    * commits no tool call, and an older runtime sends no `tool_use_id`).
    */
   #reconcileToolSteps(value: Record<string, unknown>, loopId: string): void {
-    const toolUseIds = new Set<string>();
-    for (const message of decodeMessages(value["messages"])) {
-      for (const block of message.blocks) if (block.type === "tool_use" && block.id !== "") toolUseIds.add(block.id);
-    }
+    const toolUseIds = stepDoneToolUseIds(value);
     const turnId = typeof value["turn_id"] === "string" ? value["turn_id"] : undefined;
     const stepId = typeof value["step_id"] === "string" && value["step_id"] !== "" ? value["step_id"] : undefined;
     for (const [key, step] of this.#liveToolSteps) {
@@ -846,6 +869,29 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
         this.#liveToolSteps.delete(key);
       }
     }
+  }
+
+  /** Records what a loaded StepDone commits; any other body is ignored. */
+  #noteCommitted(body: unknown): void {
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return;
+    const value = body as Record<string, unknown>;
+    if (value["type"] !== "StepDone") return;
+    for (const id of stepDoneToolUseIds(value)) this.#committedToolUseIds.add(id);
+    const scope = stepDoneScope(value);
+    if (scope !== undefined) this.#committedStepScopes.add(scope);
+  }
+
+  /** Whether a loaded StepDone already commits `step`, by `tool_use_id` or by step scope. */
+  #commitsToolStep(step: FactoryLiveToolStep): boolean {
+    if (this.#committedStale) {
+      this.#committedStale = false;
+      this.#committedToolUseIds.clear();
+      this.#committedStepScopes.clear();
+      for (const event of this.#earlierEvents.values()) this.#noteCommitted(event.body);
+      for (const event of this.#currentEvents.values()) this.#noteCommitted(event.body);
+    }
+    return (step.toolUseId !== "" && this.#committedToolUseIds.has(step.toolUseId))
+      || (step.stepId !== "" && this.#committedStepScopes.has(`${step.loopId}:${step.turnId}:${step.stepId}`));
   }
 
   #deleteLiveToolTurn(loopId: string, turnId: string): void {
@@ -955,7 +1001,26 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     this.#earlierController = undefined;
     this.#earlierEvents.clear();
     this.#earlierFloor = undefined;
+    this.#committedStale = true;
   }
+}
+
+/** The non-empty `tool_use` block ids a StepDone body commits. */
+function stepDoneToolUseIds(value: Record<string, unknown>): Set<string> {
+  const ids = new Set<string>();
+  for (const message of decodeMessages(value["messages"])) {
+    for (const block of message.blocks) if (block.type === "tool_use" && block.id !== "") ids.add(block.id);
+  }
+  return ids;
+}
+
+/** A StepDone's `loop:turn:step` scope, or undefined when it names no step. */
+function stepDoneScope(value: Record<string, unknown>): string | undefined {
+  const loopId = value["loop_id"];
+  const turnId = value["turn_id"];
+  const stepId = value["step_id"];
+  if (typeof loopId !== "string" || typeof turnId !== "string" || typeof stepId !== "string" || stepId === "") return undefined;
+  return `${loopId}:${turnId}:${stepId}`;
 }
 function positiveBound(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${name} must be a positive safe integer`);

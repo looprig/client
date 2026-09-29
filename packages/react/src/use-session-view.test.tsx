@@ -1701,12 +1701,12 @@ const execId = (n: number) => `eeeeeeee-eeee-4eee-8eee-${String(n).padStart(12, 
 function liveTool(
   phase: "started" | "completed",
   n = 1,
-  options: { turnId?: string; loopId?: string; isError?: boolean; legacy?: boolean } = {},
+  options: { turnId?: string; loopId?: string; stepId?: string; isError?: boolean; legacy?: boolean } = {},
 ) {
   const legacy = options.legacy === true;
   const body: Record<string, unknown> = {
     v: 1, type: phase === "started" ? "ToolCallStarted" : "ToolCallCompleted", session_id: FSID,
-    loop_id: options.loopId ?? LIVE_LOOP, turn_id: options.turnId ?? LIVE_TURN, step_id: LIVE_STEP,
+    loop_id: options.loopId ?? LIVE_LOOP, turn_id: options.turnId ?? LIVE_TURN, step_id: options.stepId ?? LIVE_STEP,
     event_id: `ffffffff-ffff-4fff-8fff-${String(n).padStart(12, "0")}`, created_at: "2026-09-29T12:00:00Z",
     tool_execution_id: execId(n),
     ...(legacy ? {} : { tool_use_id: `toolu_${n}` }),
@@ -1790,6 +1790,72 @@ test("an older runtime's steps (no tool_use_id) merge and are replaced by their 
   h.link.open[0]!.deliver(toolStepDone(2, ["toolu_x"], LIVE_STEP));
   await expect.poll(() => h.view.current?.coveredThrough).toBe(2);
   expect(h.view.current?.liveToolSteps).toEqual([]);
+});
+
+/** A journal page holding `bodies` at consecutive sequences from `from`. */
+function journalPage(tip: number, from: number, bodies: unknown[]) {
+  return {
+    journal_tip: tip, covered_through: tip,
+    events: bodies.map((body, index) => ({ event_id: `event-${from + index}`, journal_seq: from + index, body })),
+  };
+}
+
+test("a StepDone the REST join captured suppresses its delayed Completed and never renders twice", async () => {
+  // The join's REST capture already holds the StepDone; the WebSocket
+  // Completed that preceded it is still in flight when live delivery opens.
+  const other = "99999999-9999-4999-8999-999999999999";
+  const h = await mountFactoryView({ setup: (_link, reads) => {
+    reads.status = { ...reads.status, journal_tip: 1 };
+    reads.page = journalPage(1, 1, [toolStepDone(1, ["toolu_1"], LIVE_STEP).body]);
+  } });
+  await liveReady(h, 1);
+  h.link.open[0]!.deliver(liveTool("completed", 1));
+  // An older runtime's Completed (no tool_use_id) in the committed step scope.
+  h.link.open[0]!.deliver(liveTool("completed", 2, { legacy: true }));
+  // The duplicate WS StepDone is discarded by the join.
+  h.link.open[0]!.deliver(toolStepDone(1, ["toolu_1"], LIVE_STEP));
+  // A call in another step of the same turn is still live.
+  h.link.open[0]!.deliver(liveTool("started", 3, { stepId: other }));
+  await expect.poll(() => h.view.current?.liveToolSteps.map((step) => step.toolUseId)).toEqual(["toolu_3"]);
+  const committed = createPublicEventFolder()(h.view.current!.events).view.rows.filter((row) => row.kind === "tool");
+  expect(committed.map((row) => (row as ToolRow).toolUseId)).toEqual(["toolu_1"]);
+  // The committed row is still loaded after a reconnect, so it still wins.
+  h.link.drop();
+  await expect.poll(() => h.view.current?.liveToolSteps).toEqual([]);
+  await liveReady(h, 1);
+  h.link.open[0]!.deliver(liveTool("completed", 1));
+  h.link.open[0]!.deliver(liveTool("started", 4, { stepId: other }));
+  await expect.poll(() => h.view.current?.liveToolSteps.map((step) => step.toolUseId)).toEqual(["toolu_4"]);
+});
+
+test("a step committed in an earlier history page suppresses its late live steps", async () => {
+  const other = "99999999-9999-4999-8999-999999999999";
+  const h = await mountFactoryView({ props: { tailLimit: 2 }, setup: (_link, reads) => setPage(reads, 9, [9]) });
+  await liveReady(h, 9);
+  h.reads.queue("readJournal", journalPage(8, 7, [toolStepDone(7, ["toolu_1"], LIVE_STEP).body, publicEvent(8).body]));
+  await h.view.current!.browseEarlier();
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([7, 8, 9]);
+  h.link.open[0]!.deliver(liveTool("completed", 1, { stepId: other }));
+  h.link.open[0]!.deliver(liveTool("started", 2, { legacy: true }));
+  h.link.open[0]!.deliver(liveTool("started", 3, { stepId: other }));
+  await expect.poll(() => h.view.current?.liveToolSteps.map((step) => step.toolUseId)).toEqual(["toolu_3"]);
+});
+
+test("a lowered reset forgets committed tool steps the server no longer holds", async () => {
+  const h = await mountFactoryView({ setup: (_link, reads) => {
+    reads.status = { ...reads.status, journal_tip: 2 };
+    reads.page = journalPage(2, 1, [publicEvent(1).body, toolStepDone(2, ["toolu_1"], LIVE_STEP).body]);
+  } });
+  await liveReady(h, 2);
+  h.link.open[0]!.deliver(liveTool("started", 1));
+  await settleFrame();
+  expect(h.view.current?.liveToolSteps).toEqual([]);
+  setPage(h.reads, 1, [1]);
+  h.link.open[0]!.reset({ type: "session.reset", tenant_id: TENANT, session_id: FSID, journal_tip: 1, last_contiguous: 1 });
+  await expect.poll(() => h.view.current?.events.map((event) => event.journal_seq)).toEqual([1]);
+  await liveReady(h, 1);
+  h.link.open[0]!.deliver(liveTool("started", 1));
+  await expect.poll(() => h.view.current?.liveToolSteps.map((step) => step.toolUseId)).toEqual(["toolu_1"]);
 });
 
 test("a StepDone keeps live steps it does not commit", async () => {
