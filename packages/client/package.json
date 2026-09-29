@@ -32,7 +32,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "prepack": "npm run build && npm run typecheck && npm run test:package",
-    "test": "vitest run",
+    "test": "vitest run --exclude test/surface.test.ts --exclude test/vanilla-consumer.test.ts && vitest run --no-file-parallelism test/surface.test.ts test/vanilla-consumer.test.ts",
     "test:package": "vitest run test/surface.test.ts",
     "typecheck": "tsc -p tsconfig.typecheck.json"
   },
