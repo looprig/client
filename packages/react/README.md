@@ -9,6 +9,8 @@ live reasoning. `UseFactorySessionViewResult.liveReasoning` is required in
 v0.2.0; consumers constructing this result type must supply an empty array
 when no preview exists. Host reasoning publication itself is optional.
 Text and reasoning each have their own 64 KiB byte budget and 16-key cap.
+Since v0.3.0 `liveToolSteps` (also required) lists running and completed tool
+calls until their `StepDone` commits them, at most 64 per view.
 `browseEarlier()` pages earlier history backward on demand: each call reads
 windows of at most `tailLimit` records before the oldest loaded one (bounded
 forward `from_seq` reads; no Factory change needed) until it finds a public

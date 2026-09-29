@@ -1,6 +1,8 @@
 import { useEffect } from "react";
 import {
   createFactoryClient,
+  createPublicEventFolder,
+  liveToolRows,
   CoreInvalidRequestError,
   CoreProtocolError,
   DEFAULT_MAX_TAIL_BYTES,
@@ -14,6 +16,7 @@ import type {
   FactoryClientOptions,
   PublicGatePage,
   PublicJournalPage,
+  ToolRow,
 } from "@looprig/client";
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -1687,4 +1690,229 @@ test("an unchanged transient gate is re-read with a doubling backoff, and unmoun
   await h.unmount();
   await new Promise((resolve) => setTimeout(resolve, 400));
   expect(h.reads.of("listGates").length).toBe(before);
+});
+
+// --- Live tool steps -----------------------------------------------------------
+
+const LIVE_STEP = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const execId = (n: number) => `eeeeeeee-eeee-4eee-8eee-${String(n).padStart(12, "0")}`;
+
+/** A harness v0.42.0 public tool body; `legacy` drops the members v0.41 lacked. */
+function liveTool(
+  phase: "started" | "completed",
+  n = 1,
+  options: { turnId?: string; loopId?: string; isError?: boolean; legacy?: boolean } = {},
+) {
+  const legacy = options.legacy === true;
+  const body: Record<string, unknown> = {
+    v: 1, type: phase === "started" ? "ToolCallStarted" : "ToolCallCompleted", session_id: FSID,
+    loop_id: options.loopId ?? LIVE_LOOP, turn_id: options.turnId ?? LIVE_TURN, step_id: LIVE_STEP,
+    event_id: `ffffffff-ffff-4fff-8fff-${String(n).padStart(12, "0")}`, created_at: "2026-09-29T12:00:00Z",
+    tool_execution_id: execId(n),
+    ...(legacy ? {} : { tool_use_id: `toolu_${n}` }),
+  };
+  if (phase === "started") Object.assign(body, { tool_name: "Bash", summary: `cmd ${n}` });
+  else Object.assign(body, {
+    ...(legacy ? {} : { tool_name: "Bash", elapsed_ms: 12 }),
+    is_error: options.isError === true, result_preview: `out ${n}`,
+  });
+  return { type: "ephemeral_publication" as const, tenant_id: TENANT, session_id: FSID, body };
+}
+
+function toolStepDone(sequence: number, toolUseIds: string[], stepId?: string): EnduringPublication {
+  return {
+    ...enduringFor(sequence),
+    body: {
+      v: 1, type: "StepDone", session_id: FSID, loop_id: LIVE_LOOP, turn_id: LIVE_TURN,
+      ...(stepId === undefined ? {} : { step_id: stepId }),
+      messages: [
+        { role: "assistant", blocks: toolUseIds.map((id) => ({ type: "tool_use", ID: id, Name: "Bash", Input: { command: "go test" } })) },
+        ...toolUseIds.map((id) => ({ role: "tool", tool_use_id: id, blocks: [{ type: "text", Text: "committed" }] })),
+      ],
+    },
+  };
+}
+
+const settleFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+
+test("a live tool step runs, completes and is replaced by its committed row exactly once", async () => {
+  const seen: string[][] = [];
+  const h = await mountFactoryView({ onView: (view) => {
+    const committed = createPublicEventFolder()(view.events).view.rows
+      .filter((row) => row.kind === "tool").map((row) => (row as ToolRow).toolUseId);
+    seen.push([...committed, ...liveToolRows(view.liveToolSteps).map((row) => row.toolUseId)]);
+  } });
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveTool("started"));
+  await expect.poll(() => h.view.current?.liveToolSteps).toStrictEqual([{
+    phase: "started", loopId: LIVE_LOOP, turnId: LIVE_TURN, stepId: LIVE_STEP, toolExecutionId: execId(1),
+    toolUseId: "toolu_1", toolName: "Bash", summary: "cmd 1", isError: false, resultPreview: "",
+  }]);
+  expect(liveToolRows(h.view.current!.liveToolSteps)[0]?.status).toBe("running");
+  h.link.open[0]!.deliver(liveTool("completed"));
+  await expect.poll(() => h.view.current?.liveToolSteps[0]?.phase).toBe("completed");
+  expect(h.view.current?.liveToolSteps[0]).toMatchObject({ summary: "cmd 1", resultPreview: "out 1", elapsedMs: 12, isError: false });
+  // No step_id on the record: the join is by tool_use_id alone.
+  h.link.open[0]!.deliver(toolStepDone(1, ["toolu_1"]));
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(1);
+  expect(h.view.current?.liveToolSteps).toEqual([]);
+  expect(h.view.current?.events).toHaveLength(1);
+  expect(h.view.current?.coveredThrough).toBe(1);
+  expect(seen.every((ids) => ids.filter((id) => id === "toolu_1").length <= 1)).toBe(true);
+  expect(seen.at(-1)).toEqual(["toolu_1"]);
+});
+
+test("a Completed whose Started was lost creates the step, and a late Started never regresses it", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveTool("completed", 1, { isError: true }));
+  await expect.poll(() => h.view.current?.liveToolSteps).toHaveLength(1);
+  expect(h.view.current?.liveToolSteps[0]).toMatchObject({ phase: "completed", toolName: "Bash", summary: "", isError: true });
+  expect(liveToolRows(h.view.current!.liveToolSteps)[0]?.status).toBe("error");
+  h.link.open[0]!.deliver(liveTool("started"));
+  await settleFrame();
+  expect(h.view.current?.liveToolSteps[0]?.phase).toBe("completed");
+});
+
+test("an older runtime's steps (no tool_use_id) merge and are replaced by their StepDone's step scope", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveTool("started", 1, { legacy: true }));
+  h.link.open[0]!.deliver(liveTool("completed", 1, { legacy: true }));
+  await expect.poll(() => h.view.current?.liveToolSteps[0]?.phase).toBe("completed");
+  expect(h.view.current?.liveToolSteps).toHaveLength(1);
+  expect(h.view.current?.liveToolSteps[0]).toMatchObject({ toolUseId: "", toolName: "Bash", summary: "cmd 1", resultPreview: "out 1" });
+  expect(h.view.current?.liveToolSteps[0]).not.toHaveProperty("elapsedMs");
+  // A StepDone for another step leaves it; its own step's StepDone replaces it.
+  h.link.open[0]!.deliver(toolStepDone(1, ["toolu_other"], "99999999-9999-4999-8999-999999999999"));
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(1);
+  expect(h.view.current?.liveToolSteps).toHaveLength(1);
+  h.link.open[0]!.deliver(toolStepDone(2, ["toolu_x"], LIVE_STEP));
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(2);
+  expect(h.view.current?.liveToolSteps).toEqual([]);
+});
+
+test("a StepDone keeps live steps it does not commit", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveTool("started", 1));
+  h.link.open[0]!.deliver(liveTool("started", 2));
+  await expect.poll(() => h.view.current?.liveToolSteps).toHaveLength(2);
+  h.link.open[0]!.deliver(toolStepDone(1, ["toolu_1"]));
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(1);
+  expect(h.view.current?.liveToolSteps.map((step) => step.toolUseId)).toEqual(["toolu_2"]);
+});
+
+test.each(["TurnDone", "TurnFailed", "TurnInterrupted"])("%s clears its turn's live tool steps and suppresses late ones", async (type) => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  const otherTurn = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  h.link.open[0]!.deliver(liveTool("started", 1));
+  h.link.open[0]!.deliver(liveTool("started", 2, { turnId: otherTurn }));
+  await expect.poll(() => h.view.current?.liveToolSteps).toHaveLength(2);
+  h.link.open[0]!.deliver(completed(1, type));
+  await expect.poll(() => h.view.current?.liveToolSteps.map((step) => step.turnId)).toEqual([otherTurn]);
+  h.link.open[0]!.deliver(liveTool("completed", 1));
+  h.link.open[0]!.deliver(liveTool("started", 3));
+  await settleFrame();
+  expect(h.view.current?.liveToolSteps.map((step) => step.turnId)).toEqual([otherTurn]);
+});
+
+test("SessionStopped clears every live tool step and suppresses later ones", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  h.link.open[0]!.deliver(liveTool("started", 1));
+  await expect.poll(() => h.view.current?.liveToolSteps).toHaveLength(1);
+  h.link.open[0]!.deliver(completed(1, "SessionStopped"));
+  await expect.poll(() => h.view.current?.liveToolSteps).toEqual([]);
+  h.link.open[0]!.deliver(liveTool("started", 2));
+  await settleFrame();
+  expect(h.view.current?.liveToolSteps).toEqual([]);
+});
+
+test("reconnect and session.reset clear live tool steps and reject stale callbacks", async () => {
+  const h = await mountFactoryView({ setup: (_link, reads) => setPage(reads, 2, [2]) });
+  await liveReady(h, 2);
+  const old = h.link.open[0]!;
+  old.deliver(liveTool("started", 1));
+  await expect.poll(() => h.view.current?.liveToolSteps).toHaveLength(1);
+  h.link.drop();
+  await expect.poll(() => h.view.current?.liveToolSteps).toEqual([]);
+  old.deliver(liveTool("completed", 1));
+  await settleFrame();
+  expect(h.view.current?.liveToolSteps).toEqual([]);
+  await liveReady(h, 2);
+  h.link.open[0]!.deliver(liveTool("started", 2));
+  await expect.poll(() => h.view.current?.liveToolSteps).toHaveLength(1);
+  h.link.open[0]!.reset({ type: "session.reset", tenant_id: TENANT, session_id: FSID, journal_tip: 0, last_contiguous: 0 });
+  await expect.poll(() => h.view.current?.liveToolSteps).toEqual([]);
+});
+
+test("an identity change and access revocation clear live tool steps", async () => {
+  const h = await mountFactoryView({ setup: (_link, reads) => setPage(reads, 2, [2]) });
+  await liveReady(h, 2);
+  h.link.open[0]!.deliver(liveTool("started", 1));
+  await expect.poll(() => h.view.current?.liveToolSteps).toHaveLength(1);
+  h.reads.fail("readJournal", new CoreProtocolError({ error: { code: "not_authorized", message: "revoked", retryable: false } }));
+  await h.view.current!.browseEarlier();
+  await expect.poll(() => h.view.current?.state).toBe("failed");
+  expect(h.view.current?.liveToolSteps).toEqual([]);
+  const session = await mountFactoryView();
+  await liveReady(session);
+  session.link.open[0]!.deliver(liveTool("started", 1));
+  await expect.poll(() => session.view.current?.liveToolSteps).toHaveLength(1);
+  await session.rerender({ sessionId: "another-session" });
+  expect(session.view.current?.liveToolSteps).toEqual([]);
+});
+
+test("wrong-session and malformed tool bodies never render", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  const foreign = liveTool("started", 1);
+  h.link.open[0]!.deliver({ ...foreign, body: { ...foreign.body, session_id: "private" } });
+  const malformed = liveTool("started", 2);
+  h.link.open[0]!.deliver({ ...malformed, body: { ...malformed.body, tool_execution_id: "not-a-uuid" } });
+  h.link.open[0]!.deliver(liveText("text still works"));
+  await expect.poll(() => h.view.current?.liveText[0]?.text).toBe("text still works");
+  expect(h.view.current?.liveToolSteps).toEqual([]);
+});
+
+test("at most 64 live tool steps: the oldest completed is evicted first, then the oldest started", async () => {
+  const h = await mountFactoryView();
+  await liveReady(h);
+  for (let n = 1; n <= 64; n++) {
+    h.link.open[0]!.deliver(liveTool("started", n));
+    if (n % 16 === 0) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  h.link.open[0]!.deliver(liveTool("completed", 10));
+  h.link.open[0]!.deliver(liveTool("completed", 20));
+  await expect.poll(() => h.view.current?.liveToolSteps.length).toBe(64);
+  h.link.open[0]!.deliver(liveTool("started", 65));
+  await expect.poll(() => h.view.current?.liveToolSteps.at(-1)?.toolExecutionId).toBe(execId(65));
+  let ids = h.view.current!.liveToolSteps.map((step) => step.toolExecutionId);
+  expect(ids).toHaveLength(64);
+  expect(ids).not.toContain(execId(10));
+  expect(ids).toContain(execId(20));
+  h.link.open[0]!.deliver(liveTool("started", 66));
+  h.link.open[0]!.deliver(liveTool("started", 67));
+  await expect.poll(() => h.view.current?.liveToolSteps.at(-1)?.toolExecutionId).toBe(execId(67));
+  ids = h.view.current!.liveToolSteps.map((step) => step.toolExecutionId);
+  expect(ids).toHaveLength(64);
+  expect(ids).not.toContain(execId(20));
+  expect(ids).not.toContain(execId(1));
+  expect(ids[0]).toBe(execId(2));
+});
+
+test("tool steps and text in one frame publish once", async () => {
+  const published: number[] = [];
+  const h = await mountFactoryView({ onView: (view) => { published.push(view.liveToolSteps.length); } });
+  await liveReady(h);
+  const before = published.length;
+  h.link.open[0]!.deliver(liveText("running tests"));
+  h.link.open[0]!.deliver(liveTool("started", 1));
+  h.link.open[0]!.deliver(liveTool("started", 2));
+  await expect.poll(() => h.view.current?.liveToolSteps).toHaveLength(2);
+  expect(published.slice(before)).toEqual([2]);
+  expect(h.view.current?.events).toEqual([]);
+  expect(h.view.current?.coveredThrough).toBe(0);
 });

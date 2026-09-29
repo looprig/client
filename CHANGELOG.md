@@ -21,6 +21,32 @@
   de-duplicated, and live records arriving meanwhile are kept. This replaces
   the 0.2.0 walk forward from the journal start, which kept only one
   replaceable page and followed opaque cursors; no cursor is sent now.
+- Live tool steps. `@looprig/client` adds `decodeFactoryLiveToolStep`, which
+  decodes harness's public `ToolCallStarted`/`ToolCallCompleted` bodies
+  (carried in an ordinary `EphemeralPublication`) into a `FactoryLiveToolStep`
+  keyed by `toolExecutionId`. Harness v0.42.0 adds the `tool_use_id` join key
+  (both) and `tool_name`/`elapsed_ms` (Completed); older bodies decode with
+  those empty or absent. The summary is capped at 4 KiB, the result preview at
+  16 KiB; any other body, including `TokenDelta`, returns null.
+  `liveToolRows` maps steps to live `ToolRow`s (`live: true`, no journal
+  sequence, status `running`/`ok`/`error`).
+- **`FactoryLivePreview` is now a union** that adds `{ kind: "tool", loopId,
+  turnId, row }`; the text/reasoning shape is `FactoryLiveTextPreview`. An
+  exhaustive `switch (preview.kind)` must add a `"tool"` arm.
+  `placeLivePreviews` takes an optional sixth `liveToolSteps` argument and places
+  tool previews after reasoning and text within a turn; `livePreviewKey` for a
+  tool preview is `tool:<toolExecutionId>`.
+- `@looprig/react` exposes a **required** `liveToolSteps` array on
+  `UseFactorySessionViewResult` (consumers constructing the type add
+  `liveToolSteps: []`). A Completed whose Started was lost creates the step; a
+  committed `StepDone` removes the steps whose `toolUseId` it commits, then
+  those in its own loop, turn and step, in the same snapshot as the folded
+  row, so a call never renders twice. Turn terminals remove the turn's steps,
+  and a late step for an ended turn or a stopped session is ignored.
+  Reset, repair, reconnect, stop, identity change and access revocation clear
+  every step. At most 64 steps are kept, evicting the oldest completed, then
+  the oldest running. Steps share the text frame batching and never change
+  journal coverage. 0.2.0 clients ignore these frames.
 - `UseFactorySessionViewResult` gains the optional `earlierFrom` (the lowest
   contiguously loaded sequence, `null` before a window lands); the hook always
   sets it. `earlierState` still reports `"loading"` and `"complete"`

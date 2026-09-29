@@ -9,12 +9,15 @@ import {
   DEFAULT_MAX_REPAIR_ATTEMPTS,
   DEFAULT_REPAIR_DELAY_MS,
   decodeFactoryLiveDelta,
+  decodeFactoryLiveToolStep,
+  decodeMessages,
   isRejectedJournalCursor,
   joinFactorySessionView,
   withJournalTip,
   validateFactory,
   type CapturedTailBounds,
   type FactoryJournalOptions,
+  type FactoryLiveToolStep,
   type FactoryPageOptions,
   type FactorySessionStatus,
   type PublicGatePage,
@@ -182,6 +185,14 @@ export interface UseFactorySessionViewResult {
   readonly liveText: readonly { readonly loopId: string; readonly turnId: string; readonly text: string }[];
   /** Uncommitted assistant reasoning from this join generation. */
   readonly liveReasoning: readonly { readonly loopId: string; readonly turnId: string; readonly text: string }[];
+  /**
+   * Uncommitted tool-call steps from this join generation, in first-seen
+   * order, at most `MAX_LIVE_TOOL_STEPS`. A step is replaced by its committed
+   * `StepDone` (joined by `toolUseId`, else by loop, turn and step), vanishes
+   * at its turn's terminal, and clears on stop, reset, repair or reconnect.
+   * Map with `liveToolRows` to render it as a `ToolRow`.
+   */
+  readonly liveToolSteps: readonly FactoryLiveToolStep[];
   /** Greatest sequence this view has covered, from a page or a publication. */
   readonly coveredThrough: number;
   /** The last error seen, from a cold read or from the binding. */
@@ -247,6 +258,8 @@ const MAX_EARLIER_PAGE_BYTES = DEFAULT_MAX_TAIL_BYTES;
 const MAX_LIVE_PREVIEW_BYTES = 65_536;
 const MAX_LIVE_PREVIEW_KEYS = 16;
 const MAX_LIVE_PREVIEW_TOMBSTONES = 256;
+/** At most this many live tool steps per view; the oldest completed, then the oldest started, is evicted. */
+const MAX_LIVE_TOOL_STEPS = 64;
 const earlierPageEncoder = new TextEncoder();
 
 const COLD: Omit<FactorySessionViewSnapshot, "coveredThrough"> = {
@@ -257,6 +270,7 @@ const COLD: Omit<FactorySessionViewSnapshot, "coveredThrough"> = {
   events: [],
   liveText: [],
   liveReasoning: [],
+  liveToolSteps: [],
   error: null,
   earlierState: "idle",
   earlierFrom: null,
@@ -273,6 +287,8 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
   readonly #liveText = new Map<string, { loopId: string; turnId: string; text: string; bytes: number }>();
   readonly #liveReasoning = new Map<string, { loopId: string; turnId: string; text: string; bytes: number }>();
   readonly #livePreviewBytes = { text: 0, reasoning: 0 };
+  /** Live tool steps by `toolExecutionId`, in first-seen order. */
+  readonly #liveToolSteps = new Map<string, FactoryLiveToolStep>();
   readonly #endedTurns = new Set<string>();
   readonly #suppressedLiveKeys = new Set<string>();
   #sessionStopped = false;
@@ -544,7 +560,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     this.#resetLivePreviews(false);
     this.publish({
       state: "failed", liveState: "failed", status: null, gates: null,
-      events: [], liveText: [], liveReasoning: [], coveredThrough: 0, error: cause, earlierState: "idle",
+      events: [], liveText: [], liveReasoning: [], liveToolSteps: [], coveredThrough: 0, error: cause, earlierState: "idle",
       earlierFrom: null,
     });
     this.stop();
@@ -653,7 +669,9 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
         liveReads,
         { subscribe: (options) => {
           this.#resetLivePreviews(false);
-          this.publish({ liveState: subscriptions++ === 0 ? "joining" : "repairing", liveText: [], liveReasoning: [] });
+          this.publish({
+            liveState: subscriptions++ === 0 ? "joining" : "repairing", liveText: [], liveReasoning: [], liveToolSteps: [],
+          });
           return this.link.bindSubscription(options);
         } },
         this.tenantId,
@@ -671,12 +689,17 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
       )) {
         if (!this.#current(generation, signal)) return;
         if (event.generation !== this.#joinGeneration) {
-          const hadPreview = this.snapshot().liveText.length > 0 || this.snapshot().liveReasoning.length > 0;
+          const hadPreview = this.#hasVisiblePreview();
           this.#resetLivePreviews(false);
           this.#joinGeneration = event.generation;
           if (hadPreview && event.kind === "ephemeral") this.#scheduleLiveFrame(generation, signal);
         }
         if (event.kind === "ephemeral") {
+          const step = decodeFactoryLiveToolStep(event.publication.body, this.sessionId);
+          if (step !== null) {
+            if (this.#admitToolStep(step)) this.#scheduleLiveFrame(generation, signal);
+            continue;
+          }
           const delta = decodeFactoryLiveDelta(event.publication.body, this.sessionId);
           if (delta !== null && !this.#sessionStopped) {
             const key = `${delta.loopId}:${delta.turnId}`;
@@ -737,6 +760,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
           events: this.#ordered(), coveredThrough: event.coveredThrough, error: null,
           liveText: this.#visibleLiveText(),
           liveReasoning: this.#visibleLiveReasoning(),
+          liveToolSteps: this.#visibleLiveToolSteps(),
           ...(earlierReset ? { earlierState: "idle" as const, earlierFrom: null } : {}),
         });
       }
@@ -744,7 +768,10 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
       if (this.#current(generation, signal)) {
         // A durable snapshot remains useful during a transport repair failure.
         this.#resetLivePreviews(false);
-        this.publish({ state: this.snapshot().status === null ? "failed" : "ready", liveState: "failed", liveText: [], liveReasoning: [], error: asError(cause) });
+        this.publish({
+          state: this.snapshot().status === null ? "failed" : "ready", liveState: "failed", liveText: [], liveReasoning: [], liveToolSteps: [],
+          error: asError(cause),
+        });
       }
     }
   }
@@ -757,12 +784,83 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     return [...this.#liveReasoning.values()].map(({ loopId, turnId, text }) => ({ loopId, turnId, text }));
   }
 
+  #visibleLiveToolSteps(): FactorySessionViewSnapshot["liveToolSteps"] {
+    return [...this.#liveToolSteps.values()];
+  }
+
+  #hasVisiblePreview(): boolean {
+    const snapshot = this.snapshot();
+    return snapshot.liveText.length > 0 || snapshot.liveReasoning.length > 0 || snapshot.liveToolSteps.length > 0;
+  }
+
+  /**
+   * Upserts one live tool step (§5 rules 1-2). Suppressed for an ended turn
+   * or a stopped session, like text. A Completed whose Started was lost is
+   * created whole; one that follows its Started keeps what only the Started
+   * carried (the summary) and anything an older runtime left out of the
+   * Completed (tool name, tool_use id). Returns whether the view changed.
+   */
+  #admitToolStep(step: FactoryLiveToolStep): boolean {
+    if (this.#sessionStopped || this.#endedTurns.has(`${step.loopId}:${step.turnId}`)) return false;
+    const prior = this.#liveToolSteps.get(step.toolExecutionId);
+    if (prior !== undefined) {
+      // A Started arriving after its Completed never regresses the step.
+      if (prior.phase === "completed" && step.phase === "started") return false;
+      this.#liveToolSteps.set(step.toolExecutionId, {
+        ...step,
+        stepId: step.stepId || prior.stepId,
+        toolUseId: step.toolUseId || prior.toolUseId,
+        toolName: step.toolName || prior.toolName,
+        summary: step.summary || prior.summary,
+      });
+      return true;
+    }
+    if (this.#liveToolSteps.size >= MAX_LIVE_TOOL_STEPS) {
+      let victim: string | undefined;
+      for (const [key, candidate] of this.#liveToolSteps) {
+        if (candidate.phase === "completed") { victim = key; break; }
+      }
+      victim ??= this.#liveToolSteps.keys().next().value;
+      if (victim !== undefined) this.#liveToolSteps.delete(victim);
+    }
+    this.#liveToolSteps.set(step.toolExecutionId, step);
+    return true;
+  }
+
+  /**
+   * §5 rule 3: a committed StepDone replaces its live tool steps — every step
+   * whose `toolUseId` is one of the record's `tool_use` block ids, then every
+   * step in the record's own (loop, turn, step) scope (a truncated step
+   * commits no tool call, and an older runtime sends no `tool_use_id`).
+   */
+  #reconcileToolSteps(value: Record<string, unknown>, loopId: string): void {
+    const toolUseIds = new Set<string>();
+    for (const message of decodeMessages(value["messages"])) {
+      for (const block of message.blocks) if (block.type === "tool_use" && block.id !== "") toolUseIds.add(block.id);
+    }
+    const turnId = typeof value["turn_id"] === "string" ? value["turn_id"] : undefined;
+    const stepId = typeof value["step_id"] === "string" && value["step_id"] !== "" ? value["step_id"] : undefined;
+    for (const [key, step] of this.#liveToolSteps) {
+      if ((step.toolUseId !== "" && toolUseIds.has(step.toolUseId))
+        || (stepId !== undefined && step.stepId === stepId && step.loopId === loopId && step.turnId === turnId)) {
+        this.#liveToolSteps.delete(key);
+      }
+    }
+  }
+
+  #deleteLiveToolTurn(loopId: string, turnId: string): void {
+    for (const [key, step] of this.#liveToolSteps) {
+      if (step.loopId === loopId && step.turnId === turnId) this.#liveToolSteps.delete(key);
+    }
+  }
+
   #scheduleLiveFrame(generation: number, signal: AbortSignal): void {
     if (this.#cancelLiveFrame !== undefined) return;
     const flush = (): void => {
       this.#cancelLiveFrame = undefined;
       if (this.#current(generation, signal)) this.publish({
         liveText: this.#visibleLiveText(), liveReasoning: this.#visibleLiveReasoning(),
+        liveToolSteps: this.#visibleLiveToolSteps(),
       });
     };
     if (typeof requestAnimationFrame === "function") {
@@ -797,9 +895,10 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
   }
 
   #resetLivePreviews(publish = true): void {
-    const visible = this.snapshot().liveText.length > 0 || this.snapshot().liveReasoning.length > 0;
+    const visible = this.#hasVisiblePreview();
     this.#liveText.clear();
     this.#liveReasoning.clear();
+    this.#liveToolSteps.clear();
     this.#livePreviewBytes.text = 0;
     this.#livePreviewBytes.reasoning = 0;
     this.#endedTurns.clear();
@@ -808,7 +907,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     this.#joinGeneration = 0;
     this.#cancelLiveFrame?.();
     this.#cancelLiveFrame = undefined;
-    if (publish && visible) this.publish({ liveText: [], liveReasoning: [] });
+    if (publish && visible) this.publish({ liveText: [], liveReasoning: [], liveToolSteps: [] });
   }
 
   #reconcileLivePreviews(body: unknown): void {
@@ -817,6 +916,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     if (value["type"] === "SessionStopped") {
       this.#liveText.clear();
       this.#liveReasoning.clear();
+      this.#liveToolSteps.clear();
       this.#livePreviewBytes.text = 0;
       this.#livePreviewBytes.reasoning = 0;
       this.#sessionStopped = true;
@@ -824,6 +924,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
       for (const [key, item] of this.#liveText) if (item.loopId === value["loop_id"]) this.#deleteLiveTurn(key);
       for (const [key, item] of this.#liveReasoning) if (item.loopId === value["loop_id"]) this.#deleteLiveTurn(key);
       for (const key of this.#suppressedLiveKeys) if (key.includes(`:${value["loop_id"]}:`)) this.#suppressedLiveKeys.delete(key);
+      this.#reconcileToolSteps(value, value["loop_id"]);
     } else if (value["type"] === "TurnStarted") {
       this.#sessionStopped = false;
       if (typeof value["loop_id"] === "string") {
@@ -836,6 +937,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
       && typeof value["loop_id"] === "string" && typeof value["turn_id"] === "string") {
       const key = `${value["loop_id"]}:${value["turn_id"]}`;
       this.#deleteLiveTurn(key);
+      this.#deleteLiveToolTurn(value["loop_id"], value["turn_id"]);
       this.#remember(this.#endedTurns, key);
     } else return;
     this.#cancelLiveFrame?.();

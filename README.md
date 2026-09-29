@@ -50,3 +50,16 @@ both kinds after their last visible row for the same loop and turn, or at the
 visible tail, grouping unplaced turns in first-seen order with reasoning before
 text within each turn. An unclassifiable non-object chunk counts as text,
 matching 0.1.0.
+
+Since 0.3.0 the view also exposes a required `liveToolSteps` array: harness's
+public `ToolCallStarted`/`ToolCallCompleted` bodies, decoded by
+`decodeFactoryLiveToolStep` and keyed by `toolExecutionId`. A step shows the
+tool's redacted audit summary while running and a bounded result preview once
+completed; `liveToolRows` maps steps to live `ToolRow`s and `placeLivePreviews`
+takes them as an optional sixth argument, placing them after reasoning and text
+within their turn (`FactoryLivePreview` gains `kind: "tool"`). A committed
+`StepDone` replaces a step by `tool_use_id`, falling back to its loop, turn
+and step; a turn terminal or `SessionStopped` removes it, and reset, repair,
+reconnect and identity change clear all of them. At most 64 steps are kept
+(the oldest completed, then the oldest running, is evicted). Tool steps need a
+Host with tool-step publication enabled; older Hosts leave the array empty.
