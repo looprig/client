@@ -783,68 +783,193 @@ test("earlier history is never read automatically and starts only on an explicit
   expect(h.reads.of("readJournal").map((call) => call.options)).toMatchObject([
     { tail: 256, limit: 256 },
   ]);
+  expect(h.view.current?.earlierFrom).toBeNull();
 
   h.reads.queue("readJournal", {
     journal_tip: 9,
-    covered_through: 2,
+    covered_through: 7,
     events: [publicEvent(1), publicEvent(2)],
-    next_cursor: "older-cursor-1",
   });
   await h.view.current!.browseEarlier();
 
-  // Factory reads a request naming no position as the TAIL, so the walk's
-  // first page must name the journal's start explicitly.
-  expect(h.reads.of("readJournal")[1]?.options).toMatchObject({ limit: 256, fromSeq: 0 });
+  // The window is the records immediately BEFORE the oldest loaded one (8),
+  // read forward from an explicit position: Factory reads a request naming no
+  // position as the tail.
+  expect(h.reads.of("readJournal")[1]?.options).toMatchObject({ fromSeq: 1, limit: 7 });
   expect(h.reads.of("readJournal")[1]?.options.cursor).toBeUndefined();
   expect(h.reads.of("readJournal")[1]?.options.tail).toBeUndefined();
   expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([1, 2, 8, 9]);
-  expect(h.view.current?.earlierState).toBe("available");
-});
-
-test("each earlier-history action follows one opaque cursor, including across an empty page", async () => {
-  const h = await mountFactoryView({ setup: (link, reads) => {
-    link.holdConnect = true;
-    setPage(reads, 9, [9]);
-  } });
-  await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
-  h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 2, events: [], next_cursor: "older-cursor-2",
-  });
-  await h.view.current!.browseEarlier();
-  expect(h.view.current?.earlierState).toBe("available");
-  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([9]);
-
-  h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 5, events: [publicEvent(5)],
-  });
-  await h.view.current!.browseEarlier();
-  expect(h.reads.of("readJournal")[2]?.options).toMatchObject({ cursor: "older-cursor-2", limit: 256 });
-  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([5, 9]);
   expect(h.view.current?.earlierState).toBe("complete");
+  expect(h.view.current?.earlierFrom).toBe(1);
+
+  // Nothing earlier exists: a further action reads nothing.
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal")).toHaveLength(2);
 });
 
-test("many explicit earlier-history pages retain only the current older window", async () => {
-  const h = await mountFactoryView({ setup: (link, reads) => {
+test("earlier history pages backward one window per action and accumulates until sequence 1", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 2 }, setup: (link, reads) => {
     link.holdConnect = true;
     setPage(reads, 9, [9]);
   } });
   await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
 
-  for (let sequence = 1; sequence <= 4; sequence++) {
+  const states: (string | undefined)[] = [];
+  for (const [from, events] of [[7, [7, 8]], [5, [6]], [3, [3, 4]], [1, [1]]] as const) {
     h.reads.queue("readJournal", {
-      journal_tip: 9,
-      covered_through: sequence,
-      events: [publicEvent(sequence)],
-      ...(sequence < 4 ? { next_cursor: `older-cursor-${sequence}` } : {}),
+      journal_tip: 9, covered_through: from + 1, events: events.map((sequence) => publicEvent(sequence)),
     });
     await h.view.current!.browseEarlier();
+    expect(h.reads.of("readJournal").at(-1)?.options).toMatchObject({ fromSeq: from, limit: 2 });
+    expect(h.view.current?.earlierFrom).toBe(from);
+    states.push(h.view.current?.earlierState);
   }
 
+  expect(states).toEqual(["available", "available", "available", "complete"]);
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([1, 3, 4, 6, 7, 8, 9]);
   expect(h.reads.of("readJournal")).toHaveLength(5);
-  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([4, 9]);
   expect(h.view.current?.coveredThrough).toBe(9);
   expect(h.view.current?.liveState).toBe("joining");
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal")).toHaveLength(5);
+});
+
+test("an earlier window of only private records still advances the floor", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 3 }, setup: (link, reads) => {
+    link.holdConnect = true;
+    setPage(reads, 9, [8, 9]);
+  } });
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
+
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 7, events: [] });
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal")[1]?.options).toMatchObject({ fromSeq: 5, limit: 3 });
+  expect(h.view.current?.earlierState).toBe("available");
+  expect(h.view.current?.earlierFrom).toBe(5);
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([8, 9]);
+
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 4, events: [publicEvent(3)] });
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal")[2]?.options).toMatchObject({ fromSeq: 2, limit: 3 });
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([3, 8, 9]);
+  expect(h.view.current?.earlierState).toBe("available");
+});
+
+test("a view whose tail holds only private records pages back from its coverage watermark", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 4 }, setup: (link, reads) => {
+    link.holdConnect = true;
+    setPage(reads, 9, []);
+  } });
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 9, events: [publicEvent(6)] });
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal")[1]?.options).toMatchObject({ fromSeq: 6, limit: 4 });
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([6]);
+  expect(h.view.current?.earlierFrom).toBe(6);
+});
+
+test("a window Factory answers short (a clamped limit) is filled forward before it is shown", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 5 }, setup: (link, reads) => {
+    link.holdConnect = true;
+    setPage(reads, 9, [9]);
+  } });
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 5, events: [publicEvent(4)] });
+  h.reads.queue("readJournal", {
+    journal_tip: 9, covered_through: 9,
+    // Past the window: already loaded, and must not replace the current event.
+    events: [publicEvent(7), publicEvent(9, "stale duplicate")],
+  });
+
+  await h.view.current!.browseEarlier();
+
+  const journal = h.reads.of("readJournal");
+  expect(journal).toHaveLength(3);
+  expect(journal[1]?.options).toMatchObject({ fromSeq: 4, limit: 5 });
+  expect(journal[2]?.options).toMatchObject({ fromSeq: 6, limit: 3 });
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([4, 7, 9]);
+  expect(h.view.current?.events.at(-1)?.body).toMatchObject({ text: "event 9" });
+  expect(h.view.current?.earlierFrom).toBe(4);
+  expect(h.view.current?.earlierState).toBe("available");
+});
+
+test("an earlier window that is not covered is refused whole and retried from the same floor", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 4, maxTailPages: 2 }, setup: (link, reads) => {
+    link.holdConnect = true;
+    setPage(reads, 9, [9]);
+  } });
+  await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
+
+  // No progress: covered_through below the requested position.
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 4, events: [] });
+  await h.view.current!.browseEarlier();
+  expect(h.view.current?.earlierState).toBe("failed");
+  expect(h.view.current?.error?.message).toContain("no progress");
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([9]);
+
+  // Progress, but not within the page budget: nothing of the window is shown.
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 5, events: [publicEvent(5)] });
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 6, events: [publicEvent(6)] });
+  await h.view.current!.browseEarlier();
+  expect(h.view.current?.earlierState).toBe("failed");
+  expect(h.view.current?.error?.message).toContain("within 2 pages");
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([9]);
+  expect(h.view.current?.earlierFrom).toBeNull();
+
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 8, events: [publicEvent(5), publicEvent(8)] });
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal").at(-1)?.options).toMatchObject({ fromSeq: 5, limit: 4 });
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([5, 8, 9]);
+  expect(h.view.current?.earlierState).toBe("available");
+});
+
+test("live records arriving while an earlier window is in flight are kept alongside it", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 4 }, setup: (_link, reads) => setPage(reads, 9, [9]) });
+  await liveReady(h, 9);
+  const originalRead = h.reads.readJournal.bind(h.reads);
+  let resolveEarlier!: (page: PublicJournalPage) => void;
+  let intercepted = false;
+  h.reads.readJournal = (sessionId, options) => {
+    if (!intercepted && options?.fromSeq === 5) {
+      intercepted = true;
+      return new Promise((resolve) => { resolveEarlier = resolve; });
+    }
+    return originalRead(sessionId, options);
+  };
+
+  const pending = h.view.current!.browseEarlier();
+  await expect.poll(() => intercepted).toBe(true);
+  expect(h.view.current?.earlierState).toBe("loading");
+  h.link.open[0]!.deliver(enduringFor(10));
+  h.link.open[0]!.deliver(enduringFor(11));
+  await expect.poll(() => h.view.current?.events.map((event) => event.journal_seq)).toEqual([9, 10, 11]);
+
+  resolveEarlier({ journal_tip: 11, covered_through: 8, events: [publicEvent(6), publicEvent(8)] });
+  await pending;
+
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([6, 8, 9, 10, 11]);
+  expect(h.view.current?.coveredThrough).toBe(11);
+  expect(h.view.current?.earlierFrom).toBe(5);
+  expect(h.view.current?.earlierState).toBe("available");
+
+  // The next window pages back from the earlier floor, not from the live tip.
+  h.reads.queue("readJournal", { journal_tip: 11, covered_through: 4, events: [publicEvent(2)] });
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal").at(-1)?.options).toMatchObject({ fromSeq: 1, limit: 4 });
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([2, 6, 8, 9, 10, 11]);
   expect(h.view.current?.earlierState).toBe("complete");
+});
+
+test("browsing earlier before any durable snapshot reads nothing", async () => {
+  const h = await mountFactoryView({ setup: (link, reads) => {
+    link.holdConnect = true;
+    setPage(reads, 9, [9]);
+    reads.hold("readStatus");
+  } });
+  await expect.poll(() => h.reads.of("readJournal")).toHaveLength(1);
+  await h.view.current!.browseEarlier();
+  expect(h.reads.of("readJournal")).toHaveLength(1);
+  expect(h.view.current?.earlierState).toBe("idle");
 });
 
 test("an oversized earlier page is refused without replacing the current view", async () => {
@@ -909,30 +1034,26 @@ test("a current event wins an earlier-history duplicate at the same sequence", a
   expect(h.view.current?.events[0]?.body).toMatchObject({ text: "current event" });
 });
 
-test("a refused earlier page preserves the prior window and cursor across a live rerender", async () => {
-  const h = await mountFactoryView({ setup: (_link, reads) => setPage(reads, 9, [9]) });
+test("a refused earlier page preserves the prior window and floor across a live rerender", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 4 }, setup: (_link, reads) => setPage(reads, 9, [9]) });
   await liveReady(h, 9);
-  h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 1,
-    events: [publicEvent(1)], next_cursor: "older-1",
-  });
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 8, events: [publicEvent(5)] });
   await h.view.current!.browseEarlier();
 
   h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 2,
-    events: [publicEvent(2, "x".repeat(DEFAULT_MAX_TAIL_BYTES))], next_cursor: "older-2",
+    journal_tip: 9, covered_through: 4,
+    events: [publicEvent(2, "x".repeat(DEFAULT_MAX_TAIL_BYTES))],
   });
   await h.view.current!.browseEarlier();
+  expect(h.view.current?.earlierState).toBe("failed");
   h.link.open[0]!.deliver(enduringFor(10));
-  await expect.poll(() => h.view.current?.events.map((event) => event.journal_seq)).toEqual([1, 9, 10]);
+  await expect.poll(() => h.view.current?.events.map((event) => event.journal_seq)).toEqual([5, 9, 10]);
 
-  h.reads.queue("readJournal", {
-    journal_tip: 10, covered_through: 3, events: [publicEvent(3)],
-  });
+  h.reads.queue("readJournal", { journal_tip: 10, covered_through: 4, events: [publicEvent(3)] });
   await h.view.current!.browseEarlier();
 
-  expect(h.reads.of("readJournal").at(-1)?.options.cursor).toBe("older-1");
-  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([3, 9, 10]);
+  expect(h.reads.of("readJournal").at(-1)?.options).toMatchObject({ fromSeq: 1, limit: 4 });
+  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([3, 5, 9, 10]);
 });
 
 test("an earlier page exceeding its requested row limit is refused", async () => {
@@ -958,10 +1079,11 @@ test("a lowered live reset clears the earlier window without retaining truncated
   const h = await mountFactoryView({ setup: (_link, reads) => setPage(reads, 9, [9]) });
   await liveReady(h, 9);
   h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 1, events: [publicEvent(1)], next_cursor: "older",
+    journal_tip: 9, covered_through: 8, events: [publicEvent(1)],
   });
   await h.view.current!.browseEarlier();
   expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([1, 9]);
+  expect(h.view.current?.earlierFrom).toBe(1);
 
   setPage(h.reads, 2, [2]);
   h.link.open[0]!.reset({
@@ -972,6 +1094,7 @@ test("a lowered live reset clears the earlier window without retaining truncated
   await expect.poll(() => h.view.current?.coveredThrough).toBe(2);
   expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([2]);
   expect(h.view.current?.earlierState).toBe("idle");
+  expect(h.view.current?.earlierFrom).toBeNull();
 });
 
 test("a lowered reset aborts pending earlier history and its late success cannot revive the window", async () => {
@@ -1000,7 +1123,7 @@ test("a lowered reset aborts pending earlier history and its late success cannot
   await expect.poll(() => h.view.current?.coveredThrough).toBe(2);
   expect(earlierSignal?.aborted).toBe(true);
 
-  resolveEarlier({ journal_tip: 9, covered_through: 1, events: [publicEvent(1)], next_cursor: "stale" });
+  resolveEarlier({ journal_tip: 9, covered_through: 8, events: [publicEvent(1)] });
   await pending;
   expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([2]);
   expect(h.view.current?.earlierState).toBe("idle");
@@ -1013,7 +1136,7 @@ test("a lower first authorized projection clears history browsed from the cold v
   } });
   await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
   h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 1, events: [publicEvent(1)], next_cursor: "older",
+    journal_tip: 9, covered_through: 8, events: [publicEvent(1)],
   });
   await h.view.current!.browseEarlier();
   expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([1, 9]);
@@ -1027,15 +1150,16 @@ test("a lower first authorized projection clears history browsed from the cold v
 });
 
 test("an authoritative earlier-history denial clears the whole scoped view", async () => {
-  const h = await mountFactoryView({ setup: (link, reads) => {
+  const h = await mountFactoryView({ props: { tailLimit: 4 }, setup: (link, reads) => {
     link.holdConnect = true;
     setPage(reads, 9, [9]);
   } });
   await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
   h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 1, events: [publicEvent(1)], next_cursor: "older",
+    journal_tip: 9, covered_through: 8, events: [publicEvent(5)],
   });
   await h.view.current!.browseEarlier();
+  expect(h.view.current?.earlierFrom).toBe(5);
   h.reads.fail("readJournal", new CoreProtocolError({ error: {
     code: "not_authorized", retryable: false,
   } }));
@@ -1046,27 +1170,27 @@ test("an authoritative earlier-history denial clears the whole scoped view", asy
   expect(h.view.current?.events).toEqual([]);
   expect(h.view.current?.coveredThrough).toBe(0);
   expect(h.view.current?.earlierState).toBe("idle");
+  expect(h.view.current?.earlierFrom).toBeNull();
 });
 
-test("an authoritative denial resets the earlier cursor before a later explicit browse", async () => {
-  const h = await mountFactoryView({ setup: (link, reads) => {
+test("an authoritative denial leaves no earlier floor for a later explicit browse to read from", async () => {
+  const h = await mountFactoryView({ props: { tailLimit: 4 }, setup: (link, reads) => {
     link.holdConnect = true;
     setPage(reads, 9, [9]);
   } });
   await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
-  h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 1, events: [publicEvent(1)], next_cursor: "older-1",
-  });
+  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 8, events: [publicEvent(5)] });
   await h.view.current!.browseEarlier();
   h.reads.fail("readJournal", new CoreProtocolError({ error: {
     code: "not_authorized", retryable: false,
   } }));
   await h.view.current!.browseEarlier();
+  const reads = h.reads.of("readJournal").length;
 
-  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 2, events: [publicEvent(2)] });
   await h.view.current!.browseEarlier();
 
-  expect(h.reads.of("readJournal").at(-1)?.options.cursor).toBeUndefined();
+  expect(h.reads.of("readJournal")).toHaveLength(reads);
+  expect(h.view.current?.events).toEqual([]);
 });
 
 test("unmount aborts a pending explicit earlier-history read", async () => {
@@ -1377,40 +1501,6 @@ function gatePage(tip: number, answerability: "resident" | "unavailable" | "susp
     }],
   };
 }
-
-test("an earlier-history cursor Factory refuses (400) restarts the walk from the beginning", async () => {
-  const h = await mountFactoryView({ setup: (link, reads) => {
-    link.holdConnect = true;
-    setPage(reads, 9, [8, 9]);
-  } });
-  await expect.poll(() => h.view.current?.coveredThrough).toBe(9);
-  h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 3, events: [publicEvent(2), publicEvent(3)], next_cursor: "c2.pre-upgrade",
-  });
-  await h.view.current!.browseEarlier();
-  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([2, 3, 8, 9]);
-
-  // The Factory was upgraded between clicks: its cursors are `j1.` now.
-  h.reads.fail("readJournal", rejectedCursor());
-  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 0, events: [] }); // consumed by the refused call
-  h.reads.queue("readJournal", {
-    journal_tip: 9, covered_through: 2, events: [publicEvent(1), publicEvent(2)], next_cursor: "j1.fresh",
-  });
-  await h.view.current!.browseEarlier();
-
-  const journal = h.reads.of("readJournal");
-  expect(journal[2]?.options.cursor).toBe("c2.pre-upgrade");
-  expect(journal[3]?.options.cursor).toBeUndefined();
-  expect(journal[3]?.options.tail).toBeUndefined();
-  expect(h.view.current?.error).toBeNull();
-  expect(h.view.current?.earlierState).toBe("available");
-  // The old window was replaced by the restarted walk, not merged with it.
-  expect(h.view.current?.events.map((event) => event.journal_seq)).toEqual([1, 2, 8, 9]);
-
-  h.reads.queue("readJournal", { journal_tip: 9, covered_through: 7, events: [publicEvent(5)] });
-  await h.view.current!.browseEarlier();
-  expect(h.reads.of("readJournal")[4]?.options.cursor).toBe("j1.fresh");
-});
 
 test("a cold continuation cursor Factory refuses (400) recaptures the tail instead of failing the view", async () => {
   const h = await mountFactoryView({ setup: (link, reads) => {

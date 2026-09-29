@@ -176,7 +176,7 @@ export interface UseFactorySessionViewResult {
   readonly status: FactorySessionStatus | null;
   /** The bounded public gate projection, or null before the first read. */
   readonly gates: PublicGatePage | null;
-  /** Current cold/live events plus one replaceable earlier page, ascending by `journal_seq`. */
+  /** Current cold/live events plus explicitly loaded earlier history, ascending by `journal_seq`. */
   readonly events: readonly PublicJournalEvent[];
   /** Uncommitted assistant text from this join generation. */
   readonly liveText: readonly { readonly loopId: string; readonly turnId: string; readonly text: string }[];
@@ -186,9 +186,28 @@ export interface UseFactorySessionViewResult {
   readonly coveredThrough: number;
   /** The last error seen, from a cold read or from the binding. */
   readonly error: Error | null;
-  /** State of the explicit, one-request-per-action beginning-first history walk. */
+  /**
+   * State of the explicit, backward, one-window-per-action history walk.
+   * `"loading"` while a window is being read; `"complete"` once the view holds
+   * the journal from sequence 1 (nothing earlier exists); `"available"` when
+   * more earlier history can be requested.
+   */
   readonly earlierState: "idle" | "loading" | "available" | "complete" | "failed";
-  /** Reads at most one bounded page. The first call has neither cursor nor tail. */
+  /**
+   * The lowest journal sequence from which the view holds every public event
+   * contiguously, once an explicit earlier window has landed; `null` before
+   * that (and after a reset). `1` together with `earlierState: "complete"`
+   * means the whole journal is loaded. Optional in the type only so a result
+   * constructed by hand against 0.2.0 still type-checks; the hook always sets
+   * it.
+   */
+  readonly earlierFrom?: number | null;
+  /**
+   * Reads the window of at most `tailLimit` records immediately BEFORE the
+   * oldest loaded record and prepends its public events. Each call reads one
+   * window; call again to page further back until `earlierState` is
+   * `"complete"`. A call before the first durable snapshot is a no-op.
+   */
   readonly browseEarlier: () => Promise<void>;
 }
 
@@ -202,29 +221,22 @@ export interface UseFactorySessionViewResult {
 
 type FactorySessionViewSnapshot = Omit<UseFactorySessionViewResult, "browseEarlier">;
 
-// Earlier history has its own finite retention policy: one requested page,
-// independently capped at the same conservative encoded-event ceiling used by
-// a default captured tail. This does not claim to bound the separate current
-// cold/live event map.
+// Earlier history is paged BACKWARD in windows. Factory has no backward page
+// (Core's `previous_cursor` is declared but never set), but it serves a bounded
+// FORWARD page at any position (`from_seq`, inclusive, with its scan budget
+// equal to `limit`). So one window is the `tailLimit` records immediately
+// before the oldest loaded one, read forward from
+// `from_seq = max(1, floor - tailLimit)`: sequences are dense, so a window is
+// covered exactly once `covered_through` reaches `floor - 1`. Factory clamps
+// `limit` (to 100 today), so a window may take several forward reads; each
+// must advance coverage, the action is bounded by `maxTailPages` reads and one
+// encoded-event byte ceiling, and a window is committed whole or not at all,
+// so the view never shows a hole inside loaded history. Events at or above the
+// floor are already loaded and are dropped (a current event also wins any
+// duplicate in `#ordered`).
 //
-// `#currentEvents` really is unbounded, and the reason it is not simply capped
-// here is a missing CLIENT capability rather than a missing wire one. A
-// bounded BACKWARD page genuinely does not exist: Core's `previous_cursor`
-// (`sessionwire/v1/queries.go`) and this repo's own
-// `public_journal_page.schema.json` declare the field, but neither `factory`
-// nor `sessionstore` ever sets it (runbook 06 U2.1 step 7 asks for one; it is
-// unimplemented). That much is real.
-//
-// But Factory already serves a bounded FORWARD page positioned at an
-// arbitrary sequence — `GET .../journal?from_seq=N&limit=M`
-// (`factory/internal/httpapi/sessions.go`, `journalPositionOf` and the
-// `ReadPublicJournal` call it feeds; exercised in `sessions_test.go` and
-// backed by `sessionstore.ReadPublicJournalRequest.FromSeq`). So an evicted
-// middle would be reachable in one bounded request, not by replay from
-// sequence zero — `FactoryJournalOptions` here just doesn't plumb `from_seq`
-// yet (it only carries `cursor`, `limit` and `tail`). Adding that plumbing,
-// plus an eviction policy for this map, is a reasonable follow-up; it is
-// simply not done here. It does not need a backward page first.
+// Retention grows only with explicit user requests: every landed window is
+// kept until a lowered reset, an access revocation or an identity change.
 const MAX_EARLIER_PAGE_BYTES = DEFAULT_MAX_TAIL_BYTES;
 // Preserve the 0.1.0 text limits independently of reasoning previews.
 const MAX_LIVE_PREVIEW_BYTES = 65_536;
@@ -242,6 +254,7 @@ const COLD: Omit<FactorySessionViewSnapshot, "coveredThrough"> = {
   liveReasoning: [],
   error: null,
   earlierState: "idle",
+  earlierFrom: null,
 };
 
 /**
@@ -264,8 +277,8 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
   #controller: AbortController | undefined;
   #coldController: AbortController | undefined;
   #generation = 0;
-  #earlierCursor: string | undefined;
-  #earlierStarted = false;
+  /** Lowest sequence of contiguous loaded history, once a window landed. */
+  #earlierFloor: number | undefined;
   #earlierController: AbortController | undefined;
   #earlierInFlight: Promise<void> | undefined;
   #gateTimer: ReturnType<typeof setTimeout> | undefined;
@@ -387,15 +400,21 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
 
   browseEarlier(): Promise<void> {
     if (this.#earlierInFlight !== undefined) return this.#earlierInFlight;
-    if (this.snapshot().earlierState === "complete") return Promise.resolve();
+    const snapshot = this.snapshot();
+    // Nothing to page back from before a durable snapshot exists.
+    if (snapshot.status === null || snapshot.earlierState === "complete") return Promise.resolve();
+    const floor = this.#earlierFloor ?? this.#currentFloor();
+    if (floor <= 1) {
+      this.#earlierFloor = 1;
+      this.publish({ earlierState: "complete", earlierFrom: 1, error: null });
+      return Promise.resolve();
+    }
     const controller = new AbortController();
     this.#earlierController?.abort();
     this.#earlierController = controller;
     const generation = this.#generation;
-    const cursor = this.#earlierCursor;
-    const started = this.#earlierStarted;
     this.publish({ earlierState: "loading", error: null });
-    const read = this.#readEarlier(generation, controller, started, cursor);
+    const read = this.#readEarlier(generation, controller, floor);
     this.#earlierInFlight = read;
     void read.finally(() => {
       if (this.#earlierInFlight === read) this.#earlierInFlight = undefined;
@@ -403,54 +422,56 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     return read;
   }
 
-  async #readEarlier(
-    generation: number,
-    controller: AbortController,
-    started: boolean,
-    cursor: string | undefined,
-  ): Promise<void> {
+  /**
+   * The lowest sequence the current (cold/live) events cover contiguously: the
+   * oldest held event, or the record after the coverage watermark when the
+   * covered records are all private. Conservative: private records between a
+   * tail's start and its first public event are simply read again.
+   */
+  #currentFloor(): number {
+    let floor = this.snapshot().coveredThrough + 1;
+    for (const sequence of this.#currentEvents.keys()) if (sequence < floor) floor = sequence;
+    return floor;
+  }
+
+  async #readEarlier(generation: number, controller: AbortController, floor: number): Promise<void> {
     const signal = controller.signal;
     try {
-      // Factory reads a request naming no position as the tail, so a walk's
-      // first page names the journal's start (from_seq=0) explicitly.
-      const options: FactoryJournalOptions = { limit: this.tailLimit, signal };
-      if (started && cursor !== undefined) options.cursor = cursor;
-      else options.fromSeq = 0;
-      let raw: PublicJournalPage;
-      try {
-        raw = await this.reads().readJournal(this.sessionId, options);
-      } catch (cause) {
-        // A cursor Factory no longer honours — minted before a Factory upgrade
-        // or a re-bind — is answered 400 and means "restart the walk". Keeping
-        // it would fail every later click the same way, so the walk restarts
-        // from the beginning, once, in this same request.
-        if (options.cursor === undefined || !isRejectedJournalCursor(cause) || !this.#current(generation, signal)) {
-          throw cause;
+      const from = Math.max(1, floor - this.tailLimit);
+      const window = new Map<number, PublicJournalEvent>();
+      let next = from;
+      let bytes = 0;
+      for (let pages = 0; next < floor; pages++) {
+        if (pages >= this.tailBounds.maxPages) {
+          throw new Error(`factory earlier history window not covered within ${this.tailBounds.maxPages} pages`);
         }
-        this.#earlierEvents.clear();
-        this.#earlierCursor = undefined;
-        this.#earlierStarted = false;
-        raw = await this.reads().readJournal(this.sessionId, { fromSeq: 0, limit: this.tailLimit, signal });
+        const limit = floor - next;
+        const page = validateFactory(
+          "public_journal_page",
+          await this.reads().readJournal(this.sessionId, { fromSeq: next, limit, signal }),
+        );
+        if (!this.#current(generation, signal)) return;
+        if (page.events.length > limit) {
+          throw new Error(`factory earlier history event budget exceeded (${limit})`);
+        }
+        bytes += earlierPageEncoder.encode(JSON.stringify(page.events)).length;
+        if (bytes > MAX_EARLIER_PAGE_BYTES) {
+          throw new Error(`factory earlier history byte budget exceeded (${MAX_EARLIER_PAGE_BYTES})`);
+        }
+        if (page.covered_through < next) {
+          throw new Error(`factory earlier history made no progress at journal_seq ${next}`);
+        }
+        for (const event of page.events) {
+          if (event.journal_seq >= next && event.journal_seq < floor) window.set(event.journal_seq, event);
+        }
+        next = page.covered_through + 1;
       }
-      const page = validateFactory("public_journal_page", raw);
-      if (!this.#current(generation, signal)) return;
-      if (page.events.length > this.tailLimit) {
-        throw new Error(`factory earlier history event budget exceeded (${this.tailLimit})`);
-      }
-      const pageBytes = earlierPageEncoder.encode(JSON.stringify(page.events)).length;
-      if (pageBytes > MAX_EARLIER_PAGE_BYTES) {
-        throw new Error(`factory earlier history byte budget exceeded (${MAX_EARLIER_PAGE_BYTES})`);
-      }
-      // Explicit history is a bounded viewing window, not a second replay
-      // engine. Advancing the opaque cursor replaces the prior older page;
-      // current cold/live events stay independently retained.
-      this.#earlierEvents.clear();
-      for (const event of page.events) this.#earlierEvents.set(event.journal_seq, event);
-      this.#earlierStarted = true;
-      this.#earlierCursor = page.next_cursor;
+      for (const [sequence, event] of window) this.#earlierEvents.set(sequence, event);
+      this.#earlierFloor = from;
       this.publish({
         events: this.#ordered(),
-        earlierState: page.next_cursor === undefined ? "complete" : "available",
+        earlierState: from <= 1 ? "complete" : "available",
+        earlierFrom: from,
         error: null,
       });
     } catch (cause) {
@@ -482,6 +503,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     this.publish({
       state: "failed", liveState: "failed", status: null, gates: null,
       events: [], liveText: [], liveReasoning: [], coveredThrough: 0, error: cause, earlierState: "idle",
+      earlierFrom: null,
     });
     this.stop();
     return true;
@@ -673,7 +695,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
           events: this.#ordered(), coveredThrough: event.coveredThrough, error: null,
           liveText: this.#visibleLiveText(),
           liveReasoning: this.#visibleLiveReasoning(),
-          ...(earlierReset ? { earlierState: "idle" as const } : {}),
+          ...(earlierReset ? { earlierState: "idle" as const, earlierFrom: null } : {}),
         });
       }
     } catch (cause) {
@@ -788,8 +810,7 @@ class FactoryColdJoin extends Publisher<FactorySessionViewSnapshot> {
     this.#earlierController?.abort();
     this.#earlierController = undefined;
     this.#earlierEvents.clear();
-    this.#earlierCursor = undefined;
-    this.#earlierStarted = false;
+    this.#earlierFloor = undefined;
   }
 }
 function positiveBound(value: number, name: string): number {
